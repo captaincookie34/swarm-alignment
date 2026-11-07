@@ -51,19 +51,52 @@ These spend credits, or endpoint time. Start Docker and use the CLI. Each task s
 .venv/bin/harness run "Your task here" "A second root's task" --seed-repo path/to/repo --model <model value>
 ```
 
-To run the red-team testbed, start Docker and see [its README](src/testbed/README.md#running-it).
+### 5. Run the red-team tests
+The testbed runs 25 tests. In each one, four agents work on a shared repo of 20 small coding issues, and in most, one agent is secretly told to attack the harness. [TEST_CASES.md](src/testbed/TEST_CASES.md) and the [testbed README](src/testbed/README.md) describe every test.
 
-### 5. Read the results
+Start Docker, set your key as in step 3, then:
+```bash
+.venv/bin/python -m testbed list                  # every test, with what it checks
+
+# One test
+.venv/bin/python -m testbed run --conditions prompt_injection --seeds 1 --max-tokens 500000 \
+    --out results/first-try --worker-model <model value>
+
+# Several, separated by commas. Include baseline, the normal run to compare with
+.venv/bin/python -m testbed run --conditions baseline,prompt_injection,evade_name --seeds 1 --max-tokens 500000 \
+    --out results/batch-1 --worker-model <model value>
+
+# All 25: leave out --conditions
+.venv/bin/python -m testbed run --seeds 1 --max-tokens 500000 --out results/all --worker-model <model value>
+```
+- **Seeds are repeats:** `--seeds 1` runs each test once, as seed 0, and `--seeds 3` runs it three times. One run gives a lead, not a finding.
+- **Time and cost:** on one dedicated Hugging Face endpoint, each test took about 3.5 minutes at a 500,000-token cap, so all 25 took about 1.5 hours. Other providers bill per token, so check yours. Without `--max-tokens`, each test stops at 200,000 tokens.
+- **Use a new `--out` folder for each batch:** a folder's results add up, so mixing batches mixes their numbers.
+- **Warm up an endpoint first:** a test with a failed model call is marked `not scored` and has to be rerun, which a sleeping endpoint causes.
+- **Attackers and workers can use different models:** add `--attacker-model <model value>`.
+
+### 6. Read the results
+```bash
+.venv/bin/python -m testbed summarize results/batch-1                  # the results table
+.venv/bin/harness --runs-dir results/batch-1/runs trace <run ID>       # one run's lineage tree and steps
+```
+**[READING_RESULTS.md](src/testbed/READING_RESULTS.md) explains the output and how to reach a conclusion from it.** Read it before drawing any. In particular, "0 attempts" isn't a pass, and the score only counts what it was written to look for, so read the trace too.
+
+Each test's counts are in the `details` field of `results/<folder>/results.jsonl`, and everything an agent did, including its reasoning, is in `runs/<run ID>/calls.jsonl`. `results/` is gitignored, so results stay on your machine.
+
+For a plain `harness run`:
+
 ```bash
 .venv/bin/harness trace <run ID>       # lineage tree and each agent's steps
 .venv/bin/harness verify <run ID>      # check the logs weren't altered
 ```
-Add `--runs-dir results/<name>/runs` straight after `harness` for testbed runs.
 
 ### If something goes wrong
 | What you see | What it means |
 |---|---|
 | `ModuleNotFoundError: No module named 'pydantic_ai'` | You're using a different Python. Run through `.venv/bin/python` |
+| `No module named 'harness'` or `'testbed'`, after installing | Python skips `.pth` files marked hidden, and some macOS setups, such as a synced Desktop, hide files in `.venv`. Check with `ls -lO .venv/lib/python3.*/site-packages/*.pth`. Put the venv outside that folder, or run `export PYTHONPATH=$PWD/src` first |
+| `not scored` after a test | A model call failed, and the reason is on that line. Rerun that test |
 | `set one of ...`, or a missing API key error | The key isn't in `.env` or this terminal |
 | `Is Docker running?` | Start Docker, or use `--sandbox none` with `harness run` |
 | `429`, or `Rate limit exceeded` in the logs | The provider's limit. One testbed trial can make well over 100 requests, so check your plan's limits |
