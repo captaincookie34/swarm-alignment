@@ -198,7 +198,7 @@ def test_a_custom_live_task_replaces_the_default(tmp_path):
 
 
 def test_the_page_can_start_a_run_with_any_prompt_one_at_a_time(tmp_path):
-    from harness.monitor_demo import LIVE_MODEL, live_task, notebooks
+    from harness.monitor_demo import LIVE_MODEL, notebooks, research_task
     from harness.scripted import ScriptedModel, call
 
     numbers = iter(range(1, 10_000))
@@ -219,7 +219,7 @@ def test_the_page_can_start_a_run_with_any_prompt_one_at_a_time(tmp_path):
 
     try:
         status, defaults = request("/api/defaults")
-        assert status == 200 and defaults["task"] == live_task(40) and defaults["model"] == LIVE_MODEL
+        assert status == 200 and defaults["task"] == research_task() and defaults["model"] == LIVE_MODEL
         assert "spawn_agent" in defaults["task"]
         assert request("/api/start", {"task": task}, header=False)[0] == 403
         assert request("/api/start", {"task": "   "})[0] == 400
@@ -280,12 +280,12 @@ async def test_full_trace_and_terminal_transcript_show_spawns_prompts_and_kills(
 
 
 def test_the_page_has_a_composer_and_its_defaults_can_be_set(tmp_path):
-    from harness.monitor_demo import live_task
+    from harness.monitor_demo import research_task
     from harness.monitor_page import PAGE
 
     assert 'id="composer"' in PAGE and 'id="prompt"' in PAGE and "Enter to start" in PAGE
     monitor = Monitor(tmp_path, Signer.generate())
-    assert monitor.defaults()["task"] == live_task(40)
+    assert monitor.defaults()["task"] == research_task() and "spawn_agent three times" in research_task()
     monitor.default_task, monitor.default_model = "Say hi.", "openrouter:openai/gpt-5-nano"
     assert monitor.defaults()["task"] == "Say hi." and monitor.defaults()["model"] == "openrouter:openai/gpt-5-nano"
 

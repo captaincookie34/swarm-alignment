@@ -315,9 +315,9 @@ class Monitor:
         self.on_start = None  # called with the run directory of each page-started run
 
     def defaults(self) -> dict:
-        from .monitor_demo import LIVE_MODEL, live_task
+        from .monitor_demo import LIVE_MODEL, research_task
 
-        return {"task": self.default_task or live_task(40), "model": self.default_model or LIVE_MODEL, "max_tokens": 150_000, "pace": 2.0}
+        return {"task": self.default_task or research_task(), "model": self.default_model or LIVE_MODEL, "max_tokens": 150_000, "pace": 2.0}
 
     def start(self, task: str, model: str = "", max_tokens: int = 150_000, pace: float = 2.0) -> str:
         """Start a live run from the page, in its own thread. One at a time, since each one costs money."""

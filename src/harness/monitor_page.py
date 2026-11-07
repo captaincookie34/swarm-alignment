@@ -163,6 +163,11 @@ pre.block { margin: 4px 0 0; padding: 8px 10px; background: var(--bg); border: 1
 .c.think { color: var(--muted); font-style: italic; font-size: 13px; white-space: pre-wrap; }
 .c.end { color: var(--muted); font-size: 12.5px; }
 .c.sep { text-align: center; color: var(--muted); font-size: 12px; margin: 14px 0; border-top: 1px solid var(--line); padding-top: 8px; }
+#convo.focus .c { opacity: .28; transition: opacity .15s; }
+#convo.focus .c.hl { opacity: 1; }
+#convo.focus .c.hl .bubble { box-shadow: 0 0 0 2px var(--who); }
+#convo.focus .c.hl:not(:has(.bubble)) { background: color-mix(in srgb, var(--who) 10%, transparent); border-radius: 6px; padding: 2px 6px; }
+#convo .sel-note { position: sticky; top: -14px; z-index: 1; margin: -14px -18px 10px; padding: 6px 18px; background: var(--panel-2); border-bottom: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
 #composer { border-top: 1px solid var(--line); padding: 10px 14px 12px; display: flex; flex-direction: column; gap: 8px; }
 #composer[hidden] { display: none; }
 #prompt { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; resize: vertical; font-size: 14px; line-height: 1.5; min-height: 64px; }
@@ -202,7 +207,7 @@ pre.block { margin: 4px 0 0; padding: 8px 10px; background: var(--bg); border: 1
   </section>
   <section id="feed-panel">
     <h2><button class="tab on" data-tab="convo">Conversation</button><button class="tab" data-tab="feed">All events <span class="count" id="event-count"></span></button>
-      <span class="filter" id="feed-filters" hidden><span id="filter"></span><label class="toggle"><input type="checkbox" id="replies"> replies only</label><label class="toggle"><input type="checkbox" id="quiet"> show round and request noise</label></span></h2>
+      <span class="filter"><span id="filter"></span><span id="feed-filters" hidden style="display:flex;gap:10px"><label class="toggle"><input type="checkbox" id="replies"> replies only</label><label class="toggle"><input type="checkbox" id="quiet"> show round and request noise</label></span></span></h2>
     <div class="scroll" id="convo"><div class="empty" id="convo-empty">Press Enter below to give the agent its prompt. Its replies, tool calls and the helpers it spawns appear here, and the agents panel shows each one. Click a name for its full trace.</div></div>
     <div class="scroll" id="feed" hidden></div>
     <form id="composer">
@@ -253,9 +258,8 @@ let run = null, lastSeq = -1, events = [], state = null, selected = null, flaggi
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 const colour = (id) => {
   if (id === "harness") return "#8b949e";
-  const root = id.split(".")[0];
-  if (!(root in colours)) colours[root] = COLOURS[Object.keys(colours).length % COLOURS.length];
-  return colours[root];
+  if (!(id in colours)) colours[id] = COLOURS[Object.keys(colours).length % COLOURS.length];  // one colour per agent
+  return colours[id];
 };
 // agt_<fingerprint>_<ULID>.1.2 is long, so show the end of the ULID and the path.
 // agt_<key fingerprint>_<root's unique ID>, then .N for each generation below the root.
@@ -308,7 +312,7 @@ async function poll() {
   const s = await api(`/api/runs/${encodeURIComponent(run)}/state?after=${lastSeq}`);
   if (s.run !== run) return;
   state = s;
-  s.agents.filter((a) => !a.parent).forEach((a) => colour(a.id));  // root colours follow creation order
+  s.agents.forEach((a) => colour(a.id));  // colours follow creation order, so they don't change between refreshes
   if (s.events.length) { lastSeq = s.events[s.events.length - 1].seq; events.push(...s.events); appendEvents(s.events); }
   renderStatus(); renderAgents(); renderThreats(); composerState();
 }
@@ -366,8 +370,9 @@ function speaker(id) {
 }
 function convoRow(e) {
   const who = e.agent_id, depth = who === "harness" ? 0 : who.split(".").length - 1;
-  const name = (id) => `<span class="cname" style="color:${colour(id)}" data-trace="${esc(id)}" title="Full trace of ${esc(id)}">${esc(speaker(id))}</span>`;
-  const row = (cls, inner) => `<div class="c ${cls}" style="--who:${colour(who)};margin-left:${depth * 30}px">${inner}</div>`;
+  const name = (id) => `<span class="cname" style="color:${colour(id)}" data-pick="${esc(id)}" title="Highlight ${esc(id)}">${esc(speaker(id))}</span>`;
+  const involved = [who, ...(e.to || []), ...(e.child ? [e.child] : [])].join(" ");
+  const row = (cls, inner) => `<div class="c ${cls}" data-agents="${esc(involved)}" style="--who:${colour(who)};margin-left:${depth * 30}px">${inner}</div>`;
   if (e.type === "model.response") {
     return (e.thinking ? row("think", `${name(who)} is thinking: ${esc(e.thinking)}`) : "")
       + (e.said ? row("", `<div class="cwho">${name(who)}</div><div class="bubble">${esc(e.said)}</div>`) : "");
@@ -401,11 +406,20 @@ function appendConvo(fresh) {
   const box = $("convo"), atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
   const root = rootAgent();
   if (!youShown && root) {
-    box.innerHTML = `<div class="c you"><div class="cwho" style="color:var(--accent)">you</div><div class="bubble">${esc(root.task)}</div></div>`;
+    box.innerHTML = `<div class="c you" data-agents="${esc(root.id)}"><div class="cwho" style="color:var(--accent)">you</div><div class="bubble">${esc(root.task)}</div></div>`;
     youShown = true;
   }
   box.insertAdjacentHTML("beforeend", fresh.map(convoRow).join(""));
+  highlight();
   if (atBottom) box.scrollTop = box.scrollHeight;
+}
+// Clicking an agent highlights everything it said, did or received, and dims the rest.
+function highlight() {
+  const box = $("convo");
+  box.classList.toggle("focus", !!selected);
+  box.querySelectorAll(".c[data-agents]").forEach((row) => row.classList.toggle("hl", !!selected && row.dataset.agents.split(" ").includes(selected)));
+  const first = selected && box.querySelector(".c.hl");
+  if (first && !highlight.scrolled) { first.scrollIntoView({block: "nearest"}); highlight.scrolled = true; }
 }
 function appendEvents(fresh) {
   appendConvo(fresh);
@@ -420,7 +434,9 @@ function redrawFeed() {
   $("feed").scrollTop = $("feed").scrollHeight;
 }
 function renderFilter() {
-  $("filter").innerHTML = selected ? `showing <span class="chip" id="clear" title="show every agent">${esc(short(selected))} ✕</span>` : "";
+  $("filter").innerHTML = selected ? `highlighting <span class="chip" id="clear" title="clear" style="color:${colour(selected)}">${esc(speaker(selected))} ✕</span>` : "";
+  highlight.scrolled = false;
+  highlight();
 }
 
 function renderThreats() {
@@ -607,7 +623,9 @@ async function tick() {
 tick();
 if (location.hash === "#new") $("prompt").focus();
 const traceHash = /^#trace=(.+)$/.exec(location.hash);  // e.g. #trace=agt_… opens that agent's trace once it exists
-if (traceHash) setTimeout(() => openTrace(decodeURIComponent(traceHash[1])), 1500);  // a link that opens straight to New run
+if (traceHash) setTimeout(() => openTrace(decodeURIComponent(traceHash[1])), 1500);
+const selectHash = /^#select=(.+)$/.exec(location.hash);  // e.g. #select=agt_… highlights that agent
+if (selectHash) setTimeout(() => { selected = decodeURIComponent(selectHash[1]); renderFilter(); renderAgents(); redrawFeed(); }, 1500);  // a link that opens straight to New run
 </script>
 </body>
 </html>

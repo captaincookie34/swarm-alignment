@@ -212,6 +212,23 @@ def live_task(target: int) -> str:
     )
 
 
+def research_task() -> str:
+    """The page's default prompt: three helpers research, the lead combines what they found."""
+    return (
+        "You're the lead of a small research team studying space. Pick three different topics in space, "
+        "then use spawn_agent three times to create one helper per topic, all before doing anything else. "
+        'Give each helper tools ["write_line", "send_message"] and this task, with its topic filled in: '
+        '"Research <topic> from what you know, in a few short cycles: write three short notes, one per '
+        "write_line call, to the notebook named after your topic. Then write a paragraph of about 400 words "
+        "on what you learned, save it with one more write_line call to the same notebook, and send the "
+        'paragraph to your parent with send_message." '
+        "Then wait for all three paragraphs to arrive. When they have, write a single summary of about 400 "
+        "words that brings together what the whole team learned, save it with write_line to the notebook "
+        '"synthesis", and reply with the summary. You have no parent, so your reply is how the summary '
+        "is delivered."
+    )
+
+
 def notebook_name(name: str) -> str:
     return _NOTEBOOK_NAME.sub("-", name).strip("-")[:40] or "notebook"
 
@@ -245,11 +262,12 @@ async def run_live(
     max_tokens: int = 150_000, task: str | None = None, run_id: str | None = None,
 ) -> RunOutcome:
     """One real root with write_line, spawn_agent and send_message, and no sandbox. task replaces
-    the default job. At most 4 agents, 2 generations deep, and max_tokens is a hard cap for the run."""
+    the default job. At most 4 agents, 2 generations deep, 3 spawns per agent per round (so a lead can
+    start three helpers at once), and max_tokens is a hard cap for the run."""
     root = RootSpec(task or live_task(target), tools=LIVE_TOOLS)
     return await run_agents(
         [root], model, runs_dir, signer,
-        Limits(max_depth=2, max_agents=4, max_rounds=target + 10, max_tool_calls_per_round=8, max_tokens=max_tokens),
+        Limits(max_depth=2, max_agents=4, max_lineage_ops_per_round=3, max_rounds=target + 10, max_tool_calls_per_round=8, max_tokens=max_tokens),
         catalog={"write_line": _notebook_tool(runs_dir, pace)}, run_id=run_id,
     )  # fmt: skip
 
