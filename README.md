@@ -85,8 +85,23 @@ To give roots different configs, such as a red-team root on another model, use `
 | `harness report <run>` | Print a verified run's measures as JSON |
 | `harness verify <run>` | Check integrity. Exit code 0 `VERIFIED`, 1 `TAMPERED`, 2 `INCOMPLETE` |
 | `harness revoke <run> <agent ID> [--no-cascade]` | Revoke an ID and, by default, its descendants, also during a run |
+| `harness flag <run> <agent ID> --reason "..." [--no-cascade]` | Revoke a running agent as a threat and record it in the run's threat log |
+| `harness monitor [--demo]` | Live page of agents and requests, with flag and kill |
 
 Each `harness run` is stored in `runs/<run ID>/`, and each testbed trial in `<--out folder>/runs/<run ID>/`: `ledger.jsonl`, `calls.jsonl`, their signed heads, `revocations.jsonl` and `workspace/`. Agents can reach only `workspace/`.
+
+## Watching a run live and killing agents
+`harness monitor` opens a local page that shows every agent and its requests as they happen. If an agent looks like a threat, click **Flag & kill**, give a reason, and the harness stops it, and by default everything it created, at their next step.
+
+```bash
+.venv/bin/harness monitor --demo     # try it offline: two workers and a rogue agent, no API key or Docker
+.venv/bin/harness monitor            # or watch your own runs: start `harness run ...` in another terminal
+```
+- **Agents:** the lineage tree, with each agent's status, requests, tool calls, refusals, tokens and latest action. Click one to filter the feed to it.
+- **Live requests:** model replies, tool calls and results, messages, refusals and kills. Calls touching the logs, keys or the network are marked `⚠` to catch your eye. That's a word list, not detection, so read the rest too.
+- **Threat log:** each flag, with its reason and a signature check. It's `threats.jsonl` in the run directory, signed with the run's key and tied to the revocation it caused, so entries can't be added or edited without the key.
+
+Flagging uses the same signed revocation list as `harness revoke`, so the kill shows in the ledger and the run still verifies. From a terminal, `harness flag <run> <agent ID> --reason "..."` does the same. The page shows the logs as they're written, before verification, so check anything that matters with `harness verify`. It listens on 127.0.0.1 only, and accepts flags only from its own page.
 
 ## Viewing runs in Phoenix
 Runs can be viewed in [Phoenix](https://github.com/Arize-ai/phoenix), an open-source trace viewer that runs locally in Docker. `harness export` rebuilds a verified run's logs as [OpenTelemetry](https://opentelemetry.io/) traces: OpenInference spans, which Phoenix shows natively, plus GenAI attributes.

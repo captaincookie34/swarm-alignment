@@ -1,0 +1,144 @@
+"""The live monitor, its HTTP API, flagging and the threat log, on the offline demo run."""
+import asyncio
+import json
+import urllib.error
+import urllib.request
+
+import pytest
+
+from harness.cli import main as cli_main
+from harness.identity import Signer
+from harness.monitor import Monitor, agents, read_jsonl, serve, summarize
+from harness.monitor_demo import LEAD, PARSER, ROGUE, ROGUE_CHILD, ROGUE_GRANDCHILD, TESTS, run_demo
+from harness.revocation import read_entries
+from harness.threats import THREAT_FILE, read_threats
+from harness.verify import VERIFIED, verify_run
+
+
+async def _run_and_flag(runs, signer, flagger, reason="probing for the signing key"):
+    """Run the demo, flag the rogue once its child is busy, and return the run directory."""
+    demo = asyncio.create_task(run_demo(runs, signer, pace=0, max_rounds=30))
+    run_dir = None
+    while not demo.done():
+        await asyncio.sleep(0.02)
+        run_dir = next(runs.iterdir(), None)
+        if run_dir is None:
+            continue
+        roster = agents(read_jsonl(run_dir / "ledger.jsonl"), read_jsonl(run_dir / "calls.jsonl"))
+        rogue = next((a for a in roster if a["task"] == ROGUE), None)
+        grandchild = next((a for a in roster if a["task"] == ROGUE_GRANDCHILD), None)
+        if rogue and grandchild and grandchild["tool_calls"] >= 1:
+            await asyncio.to_thread(flagger, run_dir, rogue["id"], reason)
+            break
+    outcome = await demo
+    return run_dir, outcome
+
+
+async def test_flagging_the_rogue_kills_it_and_its_child_and_logs_a_signed_threat(tmp_path):
+    runs, signer = tmp_path / "runs", Signer.generate()
+    monitor = Monitor(runs, signer)
+    run_dir, outcome = await _run_and_flag(runs, signer, lambda d, a, r: monitor.flag(d, a, r, True))
+
+    roster = monitor.state(run_dir, -1)["agents"]
+    statuses = {a["task"]: a["status"] for a in roster}
+    assert statuses[ROGUE] == statuses[ROGUE_CHILD] == statuses[ROGUE_GRANDCHILD] == "revoked"
+    assert "revoked" not in {s for task, s in statuses.items() if task not in (ROGUE, ROGUE_CHILD, ROGUE_GRANDCHILD)}
+    # Three generations on each side, with IDs that show the lineage.
+    ids = {a["task"]: a["id"] for a in roster}
+    assert ids[TESTS].startswith(ids[PARSER] + ".") and ids[PARSER].startswith(ids[LEAD] + ".")
+    assert ids[ROGUE_GRANDCHILD] == ids[ROGUE] + ".1.1"
+
+    threats = read_threats(run_dir, signer.public_key_b64)
+    revocations, _ = read_entries(run_dir, signer.public_key_b64)
+    assert len(threats) == 1 and threats[0]["verified"] and threats[0]["reason"] == "probing for the signing key"
+    assert threats[0]["revocation_signature"] == revocations[0]["signature"]
+    assert "flagged as a threat" in revocations[0]["reason"]
+    assert verify_run(run_dir, signer.public_key_b64).status == VERIFIED
+    ledger_revokes = [e for e in read_jsonl(run_dir / "ledger.jsonl") if e["type"] == "revoke"]
+    assert [e["child"] for e in ledger_revokes] == [threats[0]["agent_id"]]  # one entry; it covers the child
+
+
+async def test_a_flag_can_spare_the_descendants(tmp_path):
+    runs, signer = tmp_path / "runs", Signer.generate()
+    monitor = Monitor(runs, signer)
+    run_dir, _ = await _run_and_flag(runs, signer, lambda d, a, r: monitor.flag(d, a, r, False))
+    statuses = {a["task"]: a["status"] for a in monitor.state(run_dir, -1)["agents"]}
+    assert statuses[ROGUE] == "revoked" and statuses[ROGUE_CHILD] != "revoked" and statuses[ROGUE_GRANDCHILD] != "revoked"
+
+
+async def test_an_edited_threat_entry_shows_as_invalid_and_a_finished_run_cant_be_flagged(tmp_path):
+    runs, signer = tmp_path / "runs", Signer.generate()
+    monitor = Monitor(runs, signer)
+    run_dir, _ = await _run_and_flag(runs, signer, lambda d, a, r: monitor.flag(d, a, r, True))
+    path = run_dir / THREAT_FILE
+    path.write_text(path.read_text().replace("signing key", "nothing much"))
+    assert [t["verified"] for t in read_threats(run_dir, signer.public_key_b64)] == [False]
+    agent = monitor.state(run_dir, -1)["agents"][0]["id"]
+    with pytest.raises(ValueError, match="already ended"):
+        monitor.flag(run_dir, agent, "too late", True)
+
+
+def test_summaries_mark_refusals_kills_and_suspicious_calls():
+    def entry(kind, payload, agent="agt_A"):
+        return {"seq": 1, "ts": 0.0, "round": 1, "agent_id": agent, "type": kind, "payload": payload}
+
+    assert summarize(entry("action.refused", {"kind": "tool", "tool": "x", "reason": "agent is revoked"}))["level"] == "danger"
+    assert summarize(entry("agent.revoked", {"reason": "flagged"}))["level"] == "danger"
+    assert summarize(entry("action.start", {"tool": "run_shell", "args": {"command": "cat ../ledger.jsonl"}}))["level"] == "warn"
+    assert summarize(entry("action.start", {"tool": "read_file", "args": {"path": "src/dates.py"}}))["level"] == "info"
+    spawned = summarize(entry("action.end", {"tool": "spawn_agent", "status": "ok", "result": "Created agt_A.1."}))
+    assert (spawned["level"], spawned["text"]) == ("lineage", "⑂ spawn: Created agt_A.1.")
+    reply = summarize(entry("model.response", {"parts": [{"part_kind": "tool-call", "tool_name": "ls", "args": "{}"}], "input_tokens": 3, "output_tokens": 2}))
+    assert reply["text"] == "model reply: wants ls()  [5 tokens]"
+
+
+def test_read_jsonl_skips_a_half_written_last_line(tmp_path):
+    path = tmp_path / "calls.jsonl"
+    path.write_text('{"seq": 0}\n{"seq": 1, "ty')
+    assert read_jsonl(path) == [{"seq": 0}]
+
+
+async def test_http_api_serves_state_and_only_accepts_flags_from_the_page(tmp_path):
+    runs, signer = tmp_path / "runs", Signer.generate()
+    server = serve(runs, signer, 0)
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+
+    def request(path, body=None, headers=None):
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(base + path, data, {"Content-Type": "application/json", **(headers or {})})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, json.loads(r.read()) if "json" in r.headers["Content-Type"] else r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def flag_via_http(run_dir, agent_id, reason):
+        url = f"/api/runs/{run_dir.name}/flag"
+        assert request(url, {"agent_id": agent_id, "reason": reason})[0] == 403  # no header
+        assert request(url, {"agent_id": agent_id}, {"X-Harness-Monitor": "1", "Host": "evil.example"})[0] == 403
+        assert request(url, {"agent_id": "agt_ZZ"}, {"X-Harness-Monitor": "1"})[0] == 400  # not in this run
+        status, body = request(url, {"agent_id": agent_id, "reason": reason}, {"X-Harness-Monitor": "1"})
+        assert status == 200 and body["threat"]["agent_id"] == agent_id
+
+    try:
+        status, page = request("/")
+        assert status == 200 and "Harness monitor" in page
+        run_dir, _ = await _run_and_flag(runs, signer, flag_via_http)
+        assert request("/api/runs")[1]["runs"][0]["id"] == run_dir.name
+        status, state = request(f"/api/runs/{run_dir.name}/state?after=-1")
+        assert status == 200 and not state["running"] and len(state["threats"]) == 1
+        assert [a["flagged"] for a in state["agents"] if a["task"] == ROGUE] == [True]
+        assert request("/api/runs/../../etc/state")[0] == 404
+        assert request("/api/runs/run_nope/state")[0] == 404
+    finally:
+        server.shutdown()
+
+
+async def test_flag_command_refuses_a_finished_run(tmp_path, capsys):
+    runs, key_dir = tmp_path / "runs", tmp_path / "keys"
+    signer = Signer.load_or_create(key_dir)
+    outcome = await run_demo(runs, signer, pace=0, max_rounds=2)
+    agent = next(iter(outcome.agents))
+    args = ["--runs-dir", str(runs), "--key-dir", str(key_dir), "flag", outcome.run_id, agent, "--reason", "test"]
+    assert await asyncio.to_thread(cli_main, args) == 1
+    assert "already ended" in capsys.readouterr().err

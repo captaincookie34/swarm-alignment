@@ -1,4 +1,4 @@
-"""Command line: keygen, run, trace, report, verify, revoke."""
+"""Command line: keygen, run, trace, report, verify, revoke, flag, monitor."""
 from __future__ import annotations
 
 import argparse
@@ -118,6 +118,50 @@ def cmd_revoke(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_flag(args: argparse.Namespace) -> int:
+    from .monitor import Monitor
+
+    run_dir = _run_dir(args, args.run)
+    if not run_dir.is_dir():
+        print(f"no run found at {run_dir}", file=sys.stderr)
+        return 1
+    Monitor(run_dir.parent, Signer.load(args.key_dir)).flag(run_dir, args.agent_id, args.reason, not args.no_cascade)
+    print(f"flagged {args.agent_id} as a threat and revoked it" + ("" if args.no_cascade else " and its descendants"))
+    return 0
+
+
+def cmd_monitor(args: argparse.Namespace) -> int:
+    import time
+    import webbrowser
+
+    from .monitor import serve
+
+    signer = Signer.load_or_create(args.key_dir)
+    try:
+        server = serve(args.runs_dir, signer, args.port)
+    except OSError as exc:
+        print(f"couldn't listen on port {args.port}: {exc}. Try --port.", file=sys.stderr)
+        return 1
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    print(f"monitor: {url}  (watching {args.runs_dir}/, Ctrl-C to stop)")
+    if not args.no_browser:
+        webbrowser.open(url)
+    try:
+        if args.demo:
+            from .monitor_demo import run_demo
+
+            print("demo: an offline scripted run with a rogue agent. Flag it in the page to kill it.")
+            outcome = asyncio.run(run_demo(args.runs_dir, signer, args.pace))
+            print(f"demo run {outcome.run_id} ended: {outcome.status}. Next: harness verify {outcome.run_id}")
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
+    return 0
+
+
 def add_trace_argument(parser: argparse.ArgumentParser) -> None:
     from .export import DEFAULT_ENDPOINT
 
@@ -218,6 +262,20 @@ def build_parser() -> argparse.ArgumentParser:
     rev.add_argument("--no-cascade", action="store_true", help="revoke only this ID, not its descendants")
     rev.add_argument("--reason", default="")
     rev.set_defaults(func=cmd_revoke)
+
+    flag = commands.add_parser("flag", help="flag a running agent as a threat: kill it and record it in the threat log")
+    flag.add_argument("run", help="run ID or run directory")
+    flag.add_argument("agent_id")
+    flag.add_argument("--reason", required=True, help="why it's a threat, for the threat log")
+    flag.add_argument("--no-cascade", action="store_true", help="kill only this ID, not its descendants")
+    flag.set_defaults(func=cmd_flag)
+
+    monitor = commands.add_parser("monitor", help="live web page of agents and their requests, where you can flag and kill them")
+    monitor.add_argument("--port", type=int, default=8321)
+    monitor.add_argument("--demo", action="store_true", help="also start an offline scripted run with a rogue agent to try it on")
+    monitor.add_argument("--pace", type=float, default=1.5, help="seconds per scripted model turn in --demo")
+    monitor.add_argument("--no-browser", action="store_true", help="don't open the page in a browser")
+    monitor.set_defaults(func=cmd_monitor)
     return parser
 
 
