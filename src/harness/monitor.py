@@ -33,6 +33,7 @@ RUN_NAME = re.compile(r"^run_[A-Za-z0-9_-]+$")
 MAX_EVENTS = 400
 _LINEAGE = ("root", "spawn", "copy", "modify")
 _EXCERPT = 160
+_SAID_LIMIT = 4_000  # a reply is shown in full up to this many characters
 # Only to catch the operator's eye. It flags nothing on its own, and a careful agent can avoid these words.
 _WATCH_WORDS = ("ledger", "calls.jsonl", "head.json", "signing", "revocations", "/proc", "..", "curl ", "wget ", "ssh", "token", "secret", ".env")
 
@@ -74,17 +75,25 @@ def suspicious(payload: dict) -> bool:
 
 
 def summarize(entry: dict) -> dict:
-    """One call-log entry as a line for the feed: (level, text). Levels: info, ok, lineage, warn, danger, quiet."""
+    """One call-log entry as a line for the feed: (level, text), plus `said` and `thinking` for a model
+    reply's own words. Levels: reply, info, ok, lineage, warn, danger, quiet."""
     kind, p = entry["type"], entry.get("payload", {})
-    level, text = "info", kind
+    level, text, extra = "info", kind, {}
     if kind == "model.request":
         level, text = "quiet", "model request"
     elif kind == "model.response":
-        calls = [f"{x['tool_name']}({_args(x.get('args'))})" for x in p.get("parts", []) if x.get("part_kind") == "tool-call"]
-        said = [x.get("content", "") for x in p.get("parts", []) if x.get("part_kind") == "text"]
+        parts = p.get("parts", [])
+        calls = [f"{x['tool_name']}({_args(x.get('args'))})" for x in parts if x.get("part_kind") == "tool-call"]
+        said = "\n\n".join(x.get("content", "") for x in parts if x.get("part_kind") == "text").strip()
+        thinking = "\n\n".join(x.get("content", "") for x in parts if x.get("part_kind") == "thinking").strip()
         tokens = (p.get("input_tokens") or 0) + (p.get("output_tokens") or 0)
-        body = "wants " + "; ".join(calls) if calls else "says " + _excerpt(" ".join(said))
-        text = f"model reply: {body}" + (f"  [{tokens} tokens]" if tokens else "")
+        cost = f"  · {tokens:,} tokens" if tokens else ""
+        level = "reply"
+        text = (f"🛠 model asks to call {'; '.join(calls)}" if calls else "💬 model replied") + cost
+        if said:
+            extra["said"] = said[:_SAID_LIMIT] + ("…" if len(said) > _SAID_LIMIT else "")
+        if thinking:
+            extra["thinking"] = thinking[:_SAID_LIMIT] + ("…" if len(thinking) > _SAID_LIMIT else "")
     elif kind == "model.error":
         level, text = ("quiet", "model call cancelled") if p.get("error") == "cancelled" else ("warn", f"model error: {p.get('error')}: {_excerpt(p.get('message', ''))}")
     elif kind == "action.start":
@@ -126,7 +135,7 @@ def summarize(entry: dict) -> dict:
         level, text = "quiet", f"used its tool calls for round {entry.get('round')}"
     elif kind == "revocation.ignored":
         level, text = "warn", f"revocation ignored for {p.get('agent_id')}: {p.get('reason')}"
-    return {"seq": entry["seq"], "ts": entry["ts"], "round": entry.get("round"), "agent_id": entry["agent_id"], "type": kind, "level": level, "text": text}
+    return {"seq": entry["seq"], "ts": entry["ts"], "round": entry.get("round"), "agent_id": entry["agent_id"], "type": kind, "level": level, "text": text, **extra}
 
 
 def agents(ledger: list[dict], calls: list[dict]) -> list[dict]:
@@ -145,7 +154,7 @@ def agents(ledger: list[dict], calls: list[dict]) -> list[dict]:
                 "task": _excerpt(e.get("task", ""), 300),
                 "status": "active",
                 "requests": 0, "tool_calls": 0, "refused": 0, "suspicious": 0, "tokens": 0,
-                "last_ts": e["ts"], "last": "created",
+                "last_ts": e["ts"], "last": "created", "last_said": "",
             }  # fmt: skip
     for e in calls:
         agent = out.get(e["agent_id"])
@@ -157,6 +166,9 @@ def agents(ledger: list[dict], calls: list[dict]) -> list[dict]:
             agent["requests"] += 1
         elif kind == "model.response":
             agent["tokens"] += (p.get("input_tokens") or 0) + (p.get("output_tokens") or 0)
+            said = " ".join(x.get("content", "") for x in p.get("parts", []) if x.get("part_kind") == "text").strip()
+            if said:
+                agent["last_said"] = _excerpt(said, 300)
         elif kind == "action.start":
             agent["tool_calls"] += 1
             agent["suspicious"] += suspicious(p)

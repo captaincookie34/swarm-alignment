@@ -89,7 +89,10 @@ def test_summaries_mark_refusals_kills_and_suspicious_calls():
     spawned = summarize(entry("action.end", {"tool": "spawn_agent", "status": "ok", "result": "Created agt_A.1."}))
     assert (spawned["level"], spawned["text"]) == ("lineage", "⑂ spawn: Created agt_A.1.")
     reply = summarize(entry("model.response", {"parts": [{"part_kind": "tool-call", "tool_name": "ls", "args": "{}"}], "input_tokens": 3, "output_tokens": 2}))
-    assert reply["text"] == "model reply: wants ls()  [5 tokens]"
+    assert reply["text"] == "🛠 model asks to call ls()  · 5 tokens" and "said" not in reply
+    spoken = summarize(entry("model.response", {"parts": [{"part_kind": "thinking", "content": "Line 5 is next."},
+                                                          {"part_kind": "text", "content": "Done.\nAll 40 lines saved."}]}))
+    assert (spoken["level"], spoken["text"], spoken["said"], spoken["thinking"]) == ("reply", "💬 model replied", "Done.\nAll 40 lines saved.", "Line 5 is next.")
 
 
 def test_read_jsonl_skips_a_half_written_last_line(tmp_path):

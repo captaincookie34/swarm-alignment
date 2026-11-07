@@ -71,7 +71,7 @@ button.kill { margin-left: auto; background: transparent; border: 1px solid colo
 button.kill:hover { background: var(--danger); color: #fff; }
 .stats { display: flex; flex-wrap: wrap; column-gap: 10px; }
 .stats span { white-space: nowrap; }
-#feed .ev { display: grid; grid-template-columns: 64px 130px 1fr; gap: 10px; padding: 4px 14px; font-family: var(--mono); font-size: 12.5px;
+#feed .ev { display: grid; grid-template-columns: 64px 130px 1fr; column-gap: 10px; row-gap: 0; padding: 4px 14px; font-family: var(--mono); font-size: 12.5px;
   border-bottom: 1px solid color-mix(in srgb, var(--line) 50%, transparent); animation: fadein .35s ease; }
 @keyframes fadein { from { background: color-mix(in srgb, var(--accent) 14%, transparent); } }
 #feed .ev .t { color: var(--quiet); }
@@ -80,6 +80,15 @@ button.kill:hover { background: var(--danger); color: #fff; }
 #feed .ev.quiet .msg { color: var(--quiet); }
 #feed .ev.ok .msg { color: #b6e3be; }
 #feed .ev.lineage .msg { color: var(--accent); font-weight: 600; }
+#feed .ev.reply .msg { color: var(--text); font-weight: 600; }
+#feed .ev .said { grid-column: 3; margin: 4px 0 6px; padding: 8px 12px; border-left: 3px solid var(--who); border-radius: 0 8px 8px 0;
+  background: color-mix(in srgb, var(--who) 12%, var(--panel-2)); color: var(--text); white-space: pre-wrap; word-break: break-word;
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }
+#feed .ev .thinking { grid-column: 3; margin: 2px 0 4px; padding: 4px 12px; border-left: 2px dashed var(--quiet); color: var(--muted);
+  font-style: italic; white-space: pre-wrap; word-break: break-word; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 13px; }
+#feed .ev .thinking::before { content: "thinking: "; font-style: normal; color: var(--quiet); }
+.said-line { margin-top: 4px; padding: 4px 8px; font-size: 13px; border-left: 3px solid var(--who); background: color-mix(in srgb, var(--who) 10%, transparent);
+  border-radius: 0 6px 6px 0; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 #feed .ev.warn .msg { color: var(--warn); }
 #feed .ev.danger { background: color-mix(in srgb, var(--danger) 9%, transparent); }
 #feed .ev.danger .msg { color: var(--danger); font-weight: 600; }
@@ -129,7 +138,7 @@ dialog button.danger { background: var(--danger); border-color: var(--danger); c
   </section>
   <section id="feed-panel">
     <h2>Live requests <span class="count" id="event-count"></span>
-      <span class="filter"><span id="filter"></span><label class="toggle"><input type="checkbox" id="quiet"> show round and request noise</label></span></h2>
+      <span class="filter"><span id="filter"></span><label class="toggle"><input type="checkbox" id="replies"> replies only</label><label class="toggle"><input type="checkbox" id="quiet"> show round and request noise</label></span></h2>
     <div class="scroll" id="feed"></div>
   </section>
   <section id="threats">
@@ -242,6 +251,7 @@ function renderAgents() {
       <div class="lineage">${origin}${kids ? ` · ${kids} ${kids > 1 ? "children" : "child"}` : ""}</div>
       <div class="meta stats"><span>${a.requests} requests</span><span>${a.tool_calls} tools</span>${a.refused ? `<span class="bad-text">${a.refused} refused</span>` : ""}${a.suspicious ? `<span style="color:var(--warn)">${a.suspicious} suspicious</span>` : ""}<span>${a.tokens.toLocaleString()} tok</span><span>${ago(a.last_ts)}</span></div>
       <div class="last">▶ ${esc(a.last)}</div>
+      ${a.last_said ? `<div class="said-line" style="--who:${colour(a.id)}" title="${esc(a.last_said)}">💬 ${esc(a.last_said)}</div>` : ""}
       <div class="task" title="${esc(a.task)}">${esc(a.task)}</div>
       </div>
     </div>`;
@@ -249,11 +259,13 @@ function renderAgents() {
 }
 
 function eventRow(e) {
-  return `<div class="ev ${e.level}" data-agent="${esc(e.agent_id)}"><span class="t">${clock(e.ts)}</span>
+  const thinking = e.thinking ? `<div class="thinking">${esc(e.thinking)}</div>` : "";
+  const said = e.said ? `<div class="said">${esc(e.said)}</div>` : "";
+  return `<div class="ev ${e.level}" data-agent="${esc(e.agent_id)}" style="--who:${colour(e.agent_id)}"><span class="t">${clock(e.ts)}</span>
     <span class="who" style="color:${colour(e.agent_id)}" title="${esc(e.agent_id)}" data-pick="${esc(e.agent_id)}">${esc(short(e.agent_id))}</span>
-    <span class="msg">${esc(e.text)}</span></div>`;
+    <span class="msg">${esc(e.text)}</span>${thinking}${said}</div>`;
 }
-const visible = (e) => (!selected || e.agent_id === selected) && ($("quiet").checked || e.level !== "quiet");
+const visible = (e) => (!selected || e.agent_id === selected) && ($("quiet").checked || e.level !== "quiet") && (!$("replies").checked || e.level === "reply");
 
 function appendEvents(fresh) {
   const feed = $("feed"), atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
@@ -318,6 +330,7 @@ $("flag-form").addEventListener("submit", async (ev) => {
 
 $("run").addEventListener("change", () => { $("follow").checked = false; switchRun($("run").value); poll(); });
 $("quiet").addEventListener("change", redrawFeed);
+$("replies").addEventListener("change", redrawFeed);
 function renderKillList() {
   const ids = [flagging, ...($("cascade").checked ? descendants(flagging, true).map((a) => a.id) : [])];
   $("kill-list").innerHTML = ids.map((id) => `<div style="color:${colour(id)}">${fullId(id)}</div>`).join("");
