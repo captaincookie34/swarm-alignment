@@ -13,6 +13,7 @@ PAGE = r"""<!doctype html>
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
   font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }
 header { display: flex; align-items: center; gap: 14px; padding: 12px 18px; border-bottom: 1px solid var(--line);
@@ -112,9 +113,6 @@ dialog button.danger { background: var(--danger); border-color: var(--danger); c
 .err { color: var(--danger); font-size: 13px; min-height: 1em; }
 button.start { background: var(--accent); color: #0d1117; border: 0; border-radius: 6px; padding: 6px 14px; font-weight: 700; cursor: pointer; }
 button.start:hover { filter: brightness(1.1); }
-#start-dialog { width: min(720px, 94vw); }
-#start-dialog h3 { color: var(--text); }
-#start-dialog textarea { min-height: 190px; font-size: 13.5px; line-height: 1.5; }
 .fields { display: grid; grid-template-columns: 1fr 140px 110px; gap: 10px; }
 .fields label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
 .fields input { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font-family: var(--mono); font-size: 12.5px; }
@@ -143,9 +141,41 @@ pre.block { margin: 4px 0 0; padding: 8px 10px; background: var(--bg); border: 1
 .step .head b { color: var(--text); }
 .step.danger .head b { color: var(--danger); }
 .step .said { margin-top: 4px; padding: 8px 12px; border-left: 3px solid var(--who); border-radius: 0 8px 8px 0; background: color-mix(in srgb, var(--who) 12%, var(--panel-2)); white-space: pre-wrap; word-break: break-word; }
+#feed-panel h2 { gap: 4px; }
+.tab { background: transparent; border: 0; border-bottom: 2px solid transparent; color: var(--muted); font: inherit; text-transform: uppercase;
+  letter-spacing: .8px; font-size: 12px; padding: 2px 8px 4px; cursor: pointer; }
+.tab.on { color: var(--text); border-bottom-color: var(--accent); }
+#convo { padding: 14px 18px; }
+.c { margin: 0 0 8px; }
+.cwho { font-size: 12px; font-weight: 700; margin-bottom: 3px; }
+.cname { cursor: pointer; font-weight: 700; }
+.cname:hover { text-decoration: underline; }
+.bubble { display: inline-block; max-width: min(760px, 100%); padding: 9px 13px; border-radius: 4px 14px 14px 14px; white-space: pre-wrap; word-break: break-word;
+  background: color-mix(in srgb, var(--who) 14%, var(--panel-2)); border: 1px solid color-mix(in srgb, var(--who) 35%, transparent); font-size: 14.5px; line-height: 1.5; }
+.c.you { text-align: right; }
+.c.you .bubble { background: color-mix(in srgb, var(--accent) 22%, var(--panel-2)); border-color: color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 14px 4px 14px 14px; text-align: left; }
+.c.tool { font: 12.5px/1.5 var(--mono); color: var(--muted); }
+.c.tool .res { color: #b6e3be; } .c.tool.bad .res { color: var(--warn); }
+.c.spawn { padding: 8px 12px; border: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent); border-radius: 10px; background: color-mix(in srgb, var(--accent) 7%, transparent); font-size: 13px; }
+.c.spawn .sub { color: var(--muted); font-size: 12.5px; margin-top: 3px; white-space: pre-wrap; }
+.c.msg { font-size: 13.5px; } .c.msg .content { color: var(--text); white-space: pre-wrap; }
+.c.danger { color: var(--danger); font-weight: 600; font-size: 13.5px; }
+.c.think { color: var(--muted); font-style: italic; font-size: 13px; white-space: pre-wrap; }
+.c.end { color: var(--muted); font-size: 12.5px; }
+.c.sep { text-align: center; color: var(--muted); font-size: 12px; margin: 14px 0; border-top: 1px solid var(--line); padding-top: 8px; }
+#composer { border-top: 1px solid var(--line); padding: 10px 14px 12px; display: flex; flex-direction: column; gap: 8px; }
+#composer[hidden] { display: none; }
+#prompt { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; resize: vertical; font-size: 14px; line-height: 1.5; min-height: 64px; }
+#prompt:focus { outline: none; border-color: var(--accent); }
+#prompt:disabled { opacity: .55; }
+.crow { display: flex; align-items: center; gap: 8px; }
+.crow .hint { margin-right: auto; }
+.hint a { color: var(--accent); }
+#settings .fields { margin-bottom: 6px; }
 #toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--danger); color: #fff; padding: 10px 18px;
   border-radius: 8px; font-weight: 600; box-shadow: 0 8px 30px rgba(0,0,0,.5); opacity: 0; transition: opacity .25s; pointer-events: none; }
 #toast.show { opacity: 1; }
+@media (max-width: 1500px) { .note { display: none; } }
 @media (max-width: 860px) {
   main { grid-template-columns: 1fr; height: auto; }
   section { max-height: 70vh; }
@@ -157,7 +187,7 @@ pre.block { margin: 4px 0 0; padding: 8px 10px; background: var(--bg); border: 1
 <body>
 <header>
   <h1>Harness monitor <span>· live agents</span></h1>
-  <button class="start" id="new-run">▶ New run</button>
+  <button class="start" id="new-run">＋ New run</button>
   <select id="run" aria-label="Run"></select>
   <label class="toggle"><input type="checkbox" id="follow" checked> follow newest run</label>
   <span id="status" class="pill">no run</span>
@@ -168,12 +198,30 @@ pre.block { margin: 4px 0 0; padding: 8px 10px; background: var(--bg); border: 1
     <h2>Agents and lineage <span class="count" id="agent-count"></span></h2>
     <div class="legend">Each ID is issued and signed by the harness, and agents never see their own:
       <code><span class="idk">agt_&lt;key&gt;_</span><span class="idr">&lt;root's unique ID&gt;</span><span class="idp">.child.grandchild</span></code></div>
-    <div class="scroll" id="agents"><div class="empty">Waiting for a run. Press <b>▶ New run</b> to start one, or use <code>harness run</code> in a terminal.</div></div>
+    <div class="scroll" id="agents"><div class="empty">No run yet. Type a prompt on the right and press Enter, or start one with <code>harness run</code> in a terminal.</div></div>
   </section>
   <section id="feed-panel">
-    <h2>Live requests <span class="count" id="event-count"></span>
-      <span class="filter"><span id="filter"></span><label class="toggle"><input type="checkbox" id="replies"> replies only</label><label class="toggle"><input type="checkbox" id="quiet"> show round and request noise</label></span></h2>
-    <div class="scroll" id="feed"></div>
+    <h2><button class="tab on" data-tab="convo">Conversation</button><button class="tab" data-tab="feed">All events <span class="count" id="event-count"></span></button>
+      <span class="filter" id="feed-filters" hidden><span id="filter"></span><label class="toggle"><input type="checkbox" id="replies"> replies only</label><label class="toggle"><input type="checkbox" id="quiet"> show round and request noise</label></span></h2>
+    <div class="scroll" id="convo"><div class="empty" id="convo-empty">Press Enter below to give the agent its prompt. Its replies, tool calls and the helpers it spawns appear here, and the agents panel shows each one. Click a name for its full trace.</div></div>
+    <div class="scroll" id="feed" hidden></div>
+    <form id="composer">
+      <textarea id="prompt" rows="4" placeholder="Give the agent a prompt…"></textarea>
+      <div class="crow">
+        <span class="hint" id="composer-hint">Enter to start · Shift+Enter for a new line · <a href="#" id="use-default">use the default prompt</a></span>
+        <button type="button" class="trace-btn" id="settings-toggle">⚙ Settings</button>
+        <button class="start" id="send">Start ▶</button>
+      </div>
+      <div id="settings" hidden>
+        <div class="fields">
+          <label>Model<input id="start-model"></label>
+          <label>Token cap for the run<input id="start-tokens" type="number" min="1000" step="1000"></label>
+          <label>Seconds per write<input id="start-pace" type="number" min="0" max="10" step="0.5"></label>
+        </div>
+        <div class="hint">The agent gets <code>write_line(text, notebook)</code>, <code>spawn_agent</code> and <code>send_message</code>. Up to 4 agents, 2 generations deep. <span id="start-cost"></span></div>
+      </div>
+      <div class="err" id="start-error"></div>
+    </form>
   </section>
   <section id="threats">
     <h2>Threat log <span class="count" id="threat-count"></span></h2>
@@ -190,21 +238,6 @@ pre.block { margin: 4px 0 0; padding: 8px 10px; background: var(--bg); border: 1
     <div><div style="color: var(--muted); font-size: 12px; margin-bottom: 4px">These IDs will be revoked:</div><div id="kill-list"></div></div>
     <div class="err" id="flag-error"></div>
     <div class="actions"><button value="cancel" formnovalidate>Cancel</button><button class="danger" id="confirm" value="ok">Flag &amp; kill</button></div>
-  </form>
-</dialog>
-<dialog id="start-dialog">
-  <form method="dialog" id="start-form">
-    <h3>Start a run</h3>
-    <div class="hint">The root agent gets this prompt and the tools <code>write_line(text, notebook)</code>, <code>spawn_agent</code> and <code>send_message</code>. Up to 4 agents, 2 generations deep. The default prompt asks it to spawn a helper.</div>
-    <textarea id="start-task" required></textarea>
-    <div class="fields">
-      <label>Model<input id="start-model"></label>
-      <label>Token cap for the run<input id="start-tokens" type="number" min="1000" step="1000"></label>
-      <label>Seconds per write<input id="start-pace" type="number" min="0" max="10" step="0.5"></label>
-    </div>
-    <div class="hint" id="start-cost"></div>
-    <div class="err" id="start-error"></div>
-    <div class="actions"><button type="button" id="start-reset">Use the default prompt</button><button value="cancel" formnovalidate>Cancel</button><button class="start" id="start-go" value="ok">Start</button></div>
   </form>
 </dialog>
 <aside id="drawer" aria-label="Full trace">
@@ -259,14 +292,15 @@ async function refreshRuns() {
   const {runs} = await api("/api/runs");
   const select = $("run"), current = select.value, html = runs.map((r) => `<option value="${esc(r.id)}">${esc(r.id)}${r.running ? "  ● live" : ""}</option>`).join("");
   if (select.dataset.html !== html) { select.innerHTML = html; select.dataset.html = html; select.value = current; }
+  if (composing) return;  // a blank page for a new prompt: don't jump back to an old run
   const want = $("follow").checked && runs.length ? runs[0].id : current || (runs[0] && runs[0].id);
   if (want) select.value = want;
   if (select.value && select.value !== run) switchRun(select.value);
 }
 
 function switchRun(id) {
-  run = id; lastSeq = -1; events = []; selected = null; colours = {};
-  $("feed").innerHTML = ""; renderFilter();
+  run = id; lastSeq = -1; events = []; selected = null; colours = {}; convoStarts = {}; youShown = false;
+  $("feed").innerHTML = ""; $("convo").innerHTML = ""; renderFilter();
 }
 
 async function poll() {
@@ -276,7 +310,7 @@ async function poll() {
   state = s;
   s.agents.filter((a) => !a.parent).forEach((a) => colour(a.id));  // root colours follow creation order
   if (s.events.length) { lastSeq = s.events[s.events.length - 1].seq; events.push(...s.events); appendEvents(s.events); }
-  renderStatus(); renderAgents(); renderThreats();
+  renderStatus(); renderAgents(); renderThreats(); composerState();
 }
 
 function renderStatus() {
@@ -321,7 +355,60 @@ function eventRow(e) {
 }
 const visible = (e) => (!selected || e.agent_id === selected) && ($("quiet").checked || e.level !== "quiet") && (!$("replies").checked || e.level === "reply");
 
+let convoStarts = {}, youShown = false;
+const rootAgent = () => state && state.agents.find((a) => !a.parent);
+function speaker(id) {
+  const r = rootAgent();
+  if (id === "harness") return "harness";
+  if (r && id === r.id) return "agent";
+  if (r && id.startsWith(r.id + ".")) return `helper ${id.slice(r.id.length)}`;
+  return short(id);
+}
+function convoRow(e) {
+  const who = e.agent_id, depth = who === "harness" ? 0 : who.split(".").length - 1;
+  const name = (id) => `<span class="cname" style="color:${colour(id)}" data-trace="${esc(id)}" title="Full trace of ${esc(id)}">${esc(speaker(id))}</span>`;
+  const row = (cls, inner) => `<div class="c ${cls}" style="--who:${colour(who)};margin-left:${depth * 30}px">${inner}</div>`;
+  if (e.type === "model.response") {
+    return (e.thinking ? row("think", `${name(who)} is thinking: ${esc(e.thinking)}`) : "")
+      + (e.said ? row("", `<div class="cwho">${name(who)}</div><div class="bubble">${esc(e.said)}</div>`) : "");
+  }
+  if (e.type === "action.start") { convoStarts[e.call_id] = e.call; return ""; }
+  if (e.type === "action.end" && e.level === "lineage") {
+    const child = e.child && state.agents.find((a) => a.id === e.child);
+    if (!child) return row("spawn", `⑂ ${name(who)} ${esc(e.text)}`);
+    return row("spawn", `⑂ ${name(who)} spawned ${name(child.id)} <span style="font-family:var(--mono);font-size:12px;color:var(--muted)">${esc(child.id)}</span>
+      <div class="sub">task: ${esc(child.task)}</div><div class="sub">tools: ${esc(child.tools.join(", "))}</div>`);
+  }
+  if (e.type === "action.end") {
+    if (e.tool === "send_message" && e.status === "ok") return "";
+    const call = convoStarts[e.call_id] || e.tool;
+    return row(`tool ${e.status === "ok" ? "" : "bad"}`, `· ${name(who)} ${esc(call)} <span class="res">→ ${esc(e.text.replace(/^◀ \S+ /, ""))}</span>`);
+  }
+  if (e.type === "message.sent") {
+    if (who === "harness") return "";
+    return row("msg", `✉ ${name(who)} → ${(e.to || []).map(name).join(", ")}: <span class="content">${esc(e.content)}</span>`);
+  }
+  if (e.type === "agent.end") {
+    if (e.level === "danger") return row("danger", `☠ ${name(who)} was killed and has stopped`);
+    return rootAgent() && who === rootAgent().id ? "" : row("end", `${name(who)} finished`);
+  }
+  if (e.type === "agent.revoked") return row("danger", `☠ ${name(who)}: ${esc(e.text.replace(/^☠ /, ""))}`);
+  if (e.level === "danger" || e.level === "warn") return row("danger", `${name(who)} ${esc(e.text)}`);
+  if (e.type === "run.end") return `<div class="c sep">${esc(e.text)}</div>`;
+  return "";
+}
+function appendConvo(fresh) {
+  const box = $("convo"), atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+  const root = rootAgent();
+  if (!youShown && root) {
+    box.innerHTML = `<div class="c you"><div class="cwho" style="color:var(--accent)">you</div><div class="bubble">${esc(root.task)}</div></div>`;
+    youShown = true;
+  }
+  box.insertAdjacentHTML("beforeend", fresh.map(convoRow).join(""));
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
 function appendEvents(fresh) {
+  appendConvo(fresh);
   const feed = $("feed"), atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
   feed.insertAdjacentHTML("beforeend", fresh.filter(visible).map(eventRow).join(""));
   while (feed.children.length > 600) feed.firstChild.remove();
@@ -349,38 +436,58 @@ function renderThreats() {
 
 function toast(text, kind = "") { const t = $("toast"); t.textContent = text; t.className = `show ${kind}`; setTimeout(() => t.classList.remove("show"), 2600); }
 
-let defaults = null;
+let defaults = null, composing = false;
 function costHint() {
   const cap = Number($("start-tokens").value) || 0, model = $("start-model").value.trim();
-  $("start-cost").textContent = model === defaults.model
-    ? `Hard cap: ${cap.toLocaleString()} tokens. Claude Haiku 5.5 costs $0.10 per million input tokens and $0.50 per million output, and most tokens here are input, so a run that hits the cap costs about $${(cap * 0.11 / 1e6).toFixed(3)}.`
-    : `Hard cap: ${cap.toLocaleString()} tokens. Check this model's price with its provider.`;
+  $("start-cost").textContent = model.endsWith("claude-haiku-5.5")
+    ? `Claude Haiku 5.5 costs $0.10 per million input tokens and $0.50 per million output, and most tokens here are input, so a run that hits the ${cap.toLocaleString()} token cap costs about $${(cap * 0.11 / 1e6).toFixed(3)}.`
+    : `The run stops at ${cap.toLocaleString()} tokens. Check this model's price with its provider.`;
 }
-$("new-run").addEventListener("click", async () => {
-  defaults = defaults || await api("/api/defaults");
-  if (!$("start-task").value) $("start-task").value = defaults.task;
-  if (!$("start-model").value) $("start-model").value = defaults.model;
-  if (!$("start-tokens").value) $("start-tokens").value = defaults.max_tokens;
-  if (!$("start-pace").value) $("start-pace").value = defaults.pace;
-  $("start-error").textContent = ""; costHint();
-  $("start-dialog").showModal(); $("start-task").focus();
-});
-$("start-reset").addEventListener("click", () => { $("start-task").value = defaults.task; });
-$("start-tokens").addEventListener("input", costHint);
-$("start-model").addEventListener("input", costHint);
-$("start-form").addEventListener("submit", async (ev) => {
-  if (ev.submitter && ev.submitter.value !== "ok") return;
-  ev.preventDefault();
-  $("start-go").disabled = true; $("start-error").textContent = "Starting…";
+async function loadDefaults() {
+  defaults = await api("/api/defaults");
+  $("prompt").value ||= defaults.task;
+  $("start-model").value ||= defaults.model;
+  $("start-tokens").value ||= defaults.max_tokens;
+  $("start-pace").value ||= defaults.pace;
+  costHint();
+}
+function composerState() {
+  const busy = !!(state && state.running);
+  $("prompt").disabled = $("send").disabled = busy;
+  $("prompt").placeholder = busy ? "The agents are working. Flag one on the left to stop it, or wait for the run to end." : "Give the agent a prompt…";
+}
+async function startRun() {
+  const task = $("prompt").value.trim();
+  if (!task) { $("start-error").textContent = "Type a prompt first."; return; }
+  $("send").disabled = true; $("start-error").textContent = "Starting…";
   try {
     const {run: id} = await api("/api/start", {
       method: "POST", headers: {"Content-Type": "application/json", "X-Harness-Monitor": "1"},
-      body: JSON.stringify({task: $("start-task").value, model: $("start-model").value, max_tokens: Number($("start-tokens").value), pace: Number($("start-pace").value)}),
+      body: JSON.stringify({task, model: $("start-model").value, max_tokens: Number($("start-tokens").value), pace: Number($("start-pace").value)}),
     });
-    $("start-dialog").close(); $("follow").checked = true; switchRun(id); toast(`Started ${id}`, "info"); poll();
-  } catch (e) { $("start-error").textContent = e.message; }
-  finally { $("start-go").disabled = false; }
+    composing = false; $("start-error").textContent = ""; $("prompt").value = ""; $("follow").checked = true; switchRun(id); showTab("convo"); poll();
+  } catch (e) { $("start-error").textContent = e.message; $("send").disabled = false; }
+}
+$("composer").addEventListener("submit", (ev) => { ev.preventDefault(); startRun(); });
+$("prompt").addEventListener("keydown", (ev) => { if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); startRun(); } });
+$("use-default").addEventListener("click", (ev) => { ev.preventDefault(); $("prompt").value = defaults.task; $("prompt").focus(); });
+$("settings-toggle").addEventListener("click", () => { $("settings").hidden = !$("settings").hidden; });
+$("start-tokens").addEventListener("input", costHint);
+$("start-model").addEventListener("input", costHint);
+$("new-run").addEventListener("click", () => {
+  if (state && state.running) { toast("Wait for this run to end, or flag its agents, before starting another.", "info"); return; }
+  composing = true; $("follow").checked = false; run = null; state = null; youShown = false; showTab("convo");
+  $("convo").innerHTML = `<div class="empty">Press Enter below to give the agent its prompt.</div>`;
+  $("agents").innerHTML = ""; $("threat-rows").innerHTML = "";
+  $("prompt").value ||= defaults ? defaults.task : ""; composerState(); $("prompt").focus();
 });
+function showTab(name) {
+  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t.dataset.tab === name));
+  $("convo").hidden = $("composer").hidden = name !== "convo";
+  $("feed").hidden = $("feed-filters").hidden = name !== "feed";
+}
+document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => showTab(t.dataset.tab)));
+loadDefaults().then(() => $("prompt").focus());
 
 let tracing = null;
 const pretty = (v) => { if (typeof v === "string") { try { return JSON.stringify(JSON.parse(v), null, 2); } catch { return v; } } return JSON.stringify(v, null, 2); };
@@ -483,7 +590,7 @@ $("flag-form").addEventListener("submit", async (ev) => {
   finally { $("confirm").disabled = false; }
 });
 
-$("run").addEventListener("change", () => { $("follow").checked = false; switchRun($("run").value); poll(); });
+$("run").addEventListener("change", () => { composing = false; $("follow").checked = false; switchRun($("run").value); poll(); });
 $("quiet").addEventListener("change", redrawFeed);
 $("replies").addEventListener("change", redrawFeed);
 function renderKillList() {
@@ -497,7 +604,7 @@ async function tick() {
   setTimeout(tick, 1000);
 }
 tick();
-if (location.hash === "#new") $("new-run").click();
+if (location.hash === "#new") $("prompt").focus();
 const traceHash = /^#trace=(.+)$/.exec(location.hash);  // e.g. #trace=agt_… opens that agent's trace once it exists
 if (traceHash) setTimeout(() => openTrace(decodeURIComponent(traceHash[1])), 1500);  // a link that opens straight to New run
 </script>

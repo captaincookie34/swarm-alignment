@@ -101,6 +101,7 @@ def summarize(entry: dict) -> dict:
         level, text = ("quiet", "model call cancelled") if p.get("error") == "cancelled" else ("warn", f"model error: {p.get('error')}: {_excerpt(p.get('message', ''))}")
     elif kind == "action.start":
         text = f"▶ {p.get('tool')}({_args(p.get('args', {}))})"
+        extra = {"call_id": p.get("call_id"), "call": f"{p.get('tool')}({_args(p.get('args', {}))})"}
         if p.get("id_claims") or p.get("ignored_args"):
             level, text = "warn", text + "  ⚠ tried to set its own ID"
         elif suspicious(p):
@@ -108,8 +109,10 @@ def summarize(entry: dict) -> dict:
     elif kind == "action.end" and p.get("tool") in ("spawn_agent", "copy_agent", "modify_agent") and p.get("status") == "ok":
         how = p["tool"].removesuffix("_agent")
         level, text = "lineage", f"⑂ {how}: {p.get('result', '')}"
+        extra = {"call_id": p.get("call_id"), "tool": p["tool"], "status": "ok"}
     elif kind == "action.end":
         status = p.get("status")
+        extra = {"call_id": p.get("call_id"), "tool": p.get("tool"), "status": status}
         detail = p.get("result") if status == "ok" else p.get("reason") or p.get("message") or ""
         level = "ok" if status == "ok" else "warn"
         text = f"◀ {p.get('tool')} {status}: {_excerpt(detail)}"
@@ -119,6 +122,7 @@ def summarize(entry: dict) -> dict:
         if entry["agent_id"] == HARNESS:
             level = "quiet"  # the harness passing a child's end-of-turn reply to its parent
         sender = f" (from {p['from']})" if p.get("from") else ""
+        extra = {"to": p.get("to", []), "content": str(p.get("content", ""))[:_SAID_LIMIT]}
         text = f"✉ to {', '.join(p.get('to', [])) or 'nobody'}{sender}: {_excerpt(p.get('content', ''))}"
     elif kind == "agent.revoked":
         level, text = "danger", f"☠ killed: {p.get('reason') or 'revoked'}"
@@ -154,7 +158,7 @@ def agents(ledger: list[dict], calls: list[dict]) -> list[dict]:
                 "created_round": e.get("round"),
                 "model": e.get("config", {}).get("model", ""),
                 "tools": e.get("config", {}).get("tools", []),
-                "task": _excerpt(e.get("task", ""), 300),
+                "task": str(e.get("task", ""))[:_SAID_LIMIT],
                 "status": "active",
                 "requests": 0, "tool_calls": 0, "refused": 0, "suspicious": 0, "tokens": 0,
                 "last_ts": e["ts"], "last": "created", "last_said": "",
@@ -297,11 +301,14 @@ class Monitor:
         self._lock = threading.Lock()
         self.outcomes: dict[str, Any] = {}
         self.announce = True  # print a summary when a page-started run ends
+        self.default_model = ""  # the page's default; empty means the live default
+        self.default_task = ""  # the page's default prompt; empty means the delegation job
+        self.on_start = None  # called with the run directory of each page-started run
 
     def defaults(self) -> dict:
         from .monitor_demo import LIVE_MODEL, live_task
 
-        return {"task": live_task(40), "model": LIVE_MODEL, "max_tokens": 150_000, "pace": 2.0}
+        return {"task": self.default_task or live_task(40), "model": self.default_model or LIVE_MODEL, "max_tokens": 150_000, "pace": 2.0}
 
     def start(self, task: str, model: str = "", max_tokens: int = 150_000, pace: float = 2.0) -> str:
         """Start a live run from the page, in its own thread. One at a time, since each one costs money."""
@@ -316,7 +323,7 @@ class Monitor:
             raise ValueError("keep the prompt under 8,000 characters")
         max_tokens = max(1_000, min(int(max_tokens), 2_000_000))
         pace = max(0.0, min(float(pace), 10.0))
-        spec = self.model_override or model.strip() or LIVE_MODEL
+        spec = self.model_override or model.strip() or self.default_model or LIVE_MODEL
         with self._lock:
             if self._started and self._started.is_alive():
                 raise ValueError("a run started from this page is still going. Flag it or wait for it to end first")
@@ -335,6 +342,8 @@ class Monitor:
         deadline = time.time() + 10  # wait for the run directory, so the page can switch to it
         while not (self.runs_dir / run_id / "calls.jsonl").exists() and self._started.is_alive() and time.time() < deadline:
             time.sleep(0.05)
+        if self.on_start:
+            self.on_start(self.runs_dir / run_id)
         if self.announce:
             self.log(f"started {run_id} on {spec if isinstance(spec, str) else 'a scripted model'}, capped at {max_tokens:,} tokens")
         return run_id

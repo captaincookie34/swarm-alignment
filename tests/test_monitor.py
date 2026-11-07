@@ -277,3 +277,14 @@ async def test_full_trace_and_terminal_transcript_show_spawns_prompts_and_kills(
     assert "agent ⑂ spawned helper .1" in text and f"task: {PARSER}" in text
     assert "agent › Split the work" in text
     assert "revoked and everything below it" in text and "run ended" in text
+
+
+def test_the_page_has_a_composer_and_its_defaults_can_be_set(tmp_path):
+    from harness.monitor_demo import live_task
+    from harness.monitor_page import PAGE
+
+    assert 'id="composer"' in PAGE and 'id="prompt"' in PAGE and "Enter to start" in PAGE
+    monitor = Monitor(tmp_path, Signer.generate())
+    assert monitor.defaults()["task"] == live_task(40)
+    monitor.default_task, monitor.default_model = "Say hi.", "openrouter:openai/gpt-5-nano"
+    assert monitor.defaults()["task"] == "Say hi." and monitor.defaults()["model"] == "openrouter:openai/gpt-5-nano"

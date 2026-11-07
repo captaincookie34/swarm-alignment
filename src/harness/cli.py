@@ -146,7 +146,7 @@ def cmd_monitor(args: argparse.Namespace) -> int:
     print(f"monitor: {url}  (watching {args.runs_dir}/, Ctrl-C to stop)")
     print("Start a run from the page with New run, or from another terminal with harness run.")
     if not args.no_browser:
-        webbrowser.open(url)
+        webbrowser.open(url + ("#new" if args.live else ""))
     try:
         if args.demo:
             from .monitor_demo import run_demo
@@ -166,31 +166,34 @@ def cmd_monitor(args: argparse.Namespace) -> int:
 
 
 def _live(args: argparse.Namespace, server, url: str) -> None:
-    """A conversation in the terminal: edit the prompt, press Enter, and read the run as it happens,
-    while the page shows the agents it spawns and their full traces. Each prompt starts a new run."""
-    from .live_chat import Transcript, ask
+    """The prompt lives on the page. This sets its default model and prompt, and mirrors each run
+    started there into the terminal as a transcript, with a summary when it ends."""
+    import threading
+
+    from .live_chat import Transcript
     from .monitor_demo import live_summary, live_task
     from .runner import resolve_model
 
-    resolve_model(args.live)  # a missing key fails here, before a run exists
+    resolve_model(args.live)  # a missing key fails here, before anything starts
     monitor = server.monitor
-    monitor.announce = False  # this terminal prints its own transcript and summary
+    monitor.default_model = args.live
+    monitor.default_task = args.task or (live_task(args.target) if args.target != 40 else "")
+    monitor.announce = False
     colour = sys.stdout.isatty()
-    print(f"\nModel {args.live}. Each run is capped at {args.max_tokens:,} tokens.")
-    print(f"Agents, lineage and full traces: {url}  Flag any agent there to kill it.")
-    print("Edit the prompt or press Enter to start it. Ctrl-C to quit.\n")
-    default = args.task or live_task(args.target)
-    while True:
-        task = ask(default, colour)
-        if not task:
-            continue
-        run_id = monitor.start(task, args.live, args.max_tokens, args.pace or 2.0)
-        print(f"  run {run_id}")
-        Transcript(args.runs_dir / run_id, colour).follow()
-        monitor.wait()
-        print("\n".join(live_summary(args.runs_dir / run_id, monitor.outcomes[run_id], monitor.signer.public_key_b64)))
-        print(f"Full record: harness trace {run_id}\n\nType a prompt for a new run, or Ctrl-C to quit.")
-        default = ""
+
+    def mirror(run_dir) -> None:
+        def follow() -> None:
+            print(f"\n── {run_dir.name} ──")
+            Transcript(run_dir, colour).follow()
+            monitor.wait()
+            if run_dir.name in monitor.outcomes:
+                print("\n".join(live_summary(run_dir, monitor.outcomes[run_dir.name], monitor.signer.public_key_b64)))
+
+        threading.Thread(target=follow, daemon=True).start()
+
+    monitor.on_start = mirror
+    print(f"\nModel {args.live}. Type your prompt on the page, or press Enter there to use the default:")
+    print(f"  {url}\nRuns started there are mirrored here as a transcript.")
 
 
 def add_trace_argument(parser: argparse.ArgumentParser) -> None:
@@ -307,7 +310,7 @@ def build_parser() -> argparse.ArgumentParser:
     monitor.add_argument("--live", nargs="?", const="openrouter:anthropic/claude-haiku-5.5", metavar="MODEL",
                          help="also start a cheap, harmless run on a real model (default: %(const)s)")
     monitor.add_argument("--target", type=int, default=40, help="--live: how many lines the agent should write")
-    monitor.add_argument("--task", help="--live: your own prompt for the root agent, instead of the default notebook job. "
+    monitor.add_argument("--task", help="--live: the page's default prompt, instead of the notebook job. "
                          "It has write_line(text, notebook), spawn_agent and send_message")
     monitor.add_argument("--max-tokens", type=int, default=150_000, help="--live: hard cap on the run's tokens")
     monitor.add_argument("--pace", type=float, default=None, help="seconds per step: scripted turn in --demo (1.5), tool call in --live (2)")
