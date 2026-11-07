@@ -10,6 +10,7 @@ import asyncio
 import os
 import secrets
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,6 +59,31 @@ class ExecResult:
     stderr: str
     truncated: bool = False
     timed_out: bool = False
+
+
+def move_workspace(source: Path, destination: Path) -> None:
+    """Move the agents' files to their final place, without being tricked by what's in them.
+
+    A rename doesn't read any file. If it can't be done (another disk), the copy takes only
+    regular files and folders, recreates symlinks without following them, and skips anything
+    else, since opening a planted FIFO, for example, would hang the harness.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.rename(source, destination)
+        return
+    except OSError:
+        pass
+    for folder, dirs, files in os.walk(source, followlinks=False):
+        target = destination / Path(folder).relative_to(source)
+        target.mkdir(parents=True, exist_ok=True)
+        for name in [*dirs, *files]:
+            path, out = Path(folder) / name, target / name
+            if path.is_symlink():
+                out.symlink_to(os.readlink(path))
+            elif path.is_file():
+                shutil.copy2(path, out, follow_symlinks=False)
+    shutil.rmtree(source, ignore_errors=True)
 
 
 def parse_snapshot(text: str) -> dict[str, str]:
@@ -125,6 +151,8 @@ class DockerSandbox:
         self.lock = asyncio.Lock()
         self.last_snapshot: dict[str, str] = {}
         self.stop_failed = False  # set when a killed command couldn't be confirmed stopped
+        self.mounted: Path | None = None  # the neutral folder the container sees as /workspace
+        self._destination: Path | None = None
 
     async def _ensure_image(self) -> None:
         check = await asyncio.create_subprocess_exec(
@@ -145,9 +173,16 @@ class DockerSandbox:
             raise SandboxError(f"could not build sandbox image: {stderr.decode(errors='replace').strip()}")
 
     async def start(self, workspace: Path, seed_repo: Path | None = None) -> None:
+        """workspace is where the files end up. The container never sees that path.
+
+        A bind mount's source is visible inside the container (in /proc/self/mountinfo), so
+        mounting the run's own folder would show agents the run ID and the host's folder
+        layout, including the username. They get a randomly named temporary folder instead.
+        """
+        self._destination = workspace
+        self.mounted = Path(tempfile.mkdtemp(prefix="ws-"))
         if seed_repo is not None:
-            shutil.copytree(seed_repo, workspace, symlinks=True)
-        workspace.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(seed_repo, self.mounted, symlinks=True, dirs_exist_ok=True)
         await self._ensure_image()
         proc = await asyncio.create_subprocess_exec(
             "docker", "run", "--detach", "--rm",
@@ -163,7 +198,7 @@ class DockerSandbox:
             "--memory", self.memory,
             "--cpus", self.cpus,
             "--pids-limit", str(self.pids),
-            "--volume", f"{workspace.resolve()}:{WORKDIR}",
+            "--volume", f"{self.mounted.resolve()}:{WORKDIR}",
             "--workdir", WORKDIR,
             # Bounded, so a killed harness can't leave a container running forever.
             self.image, "sleep", str(self.lifetime_seconds),
@@ -183,6 +218,9 @@ class DockerSandbox:
             stderr=asyncio.subprocess.DEVNULL,
         )  # fmt: skip
         await proc.wait()
+        if self.mounted is not None and self._destination is not None:
+            move_workspace(self.mounted, self._destination)
+            self.mounted = None
 
     def _exec_argv(self, argv: list[str], interactive: bool) -> list[str]:
         return ["docker", "exec", *(["--interactive"] if interactive else []), self.name, *argv]

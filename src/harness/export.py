@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .identity import parent_of
+from .identity import parent_of, short_id
 from .log import HARNESS
 from .verify import VERIFIED, VerifyResult
 
@@ -148,7 +148,7 @@ def export_run(result: VerifyResult, run_id: str, endpoint: str = DEFAULT_ENDPOI
         agent, config = e["child"], e.get("config", {})
         end = ends.get(agent)
         parent_span = agents[parent_of(agent)][0] if parent_of(agent) in agents else run_span
-        span = start(f"agent:{agent}", f"agent {agent}", parent_span, e["ts"], {
+        span = start(f"agent:{agent}", f"agent {short_id(agent)}", parent_span, e["ts"], {
             "openinference.span.kind": "AGENT",
             "gen_ai.agent.name": agent,
             "harness.agent.id": agent,
@@ -175,7 +175,7 @@ def export_run(result: VerifyResult, run_id: str, endpoint: str = DEFAULT_ENDPOI
             rounds.setdefault((e["agent_id"], e["round"]), []).append(e)
     round_spans = {}
     for (agent, number), entries in sorted(rounds.items(), key=lambda kv: kv[1][0]["seq"]):
-        span = start(f"round:{agent}:{number}", f"{agent} round {number}", agent_span(agent), entries[0]["ts"],
+        span = start(f"round:{agent}:{number}", f"{short_id(agent)} round {number}", agent_span(agent), entries[0]["ts"],
                      {"openinference.span.kind": "CHAIN", "harness.agent.id": agent, "harness.round": number})  # fmt: skip
         round_spans[(agent, number)] = (span, entries[-1]["ts"])
 

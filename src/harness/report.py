@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from .identity import parent_of
+from .identity import parent_of, root_of, short_id
 from .revocation import entry_covers
 from .verify import VerifyResult
 
@@ -151,7 +151,7 @@ def render_trace(result: VerifyResult, only_agent: str | None = None, full: bool
         turns = sum(e["type"] == "model.request" for e in entries)
         end = next((e["payload"] for e in entries if e["type"] == "agent.end"), {})
         title = (
-            f"{indent}{agent_id}  {event['type']}, config {event['config_hash'][:8]}, "
+            f"{indent}{short_id(agent_id)}  {event['type']}, config {event['config_hash'][:8]}, "
             f"born round {event['round']}  [{end.get('status', 'no end recorded')}]  {turns} model turns"
         )
         lines = [title]
@@ -172,5 +172,8 @@ def render_trace(result: VerifyResult, only_agent: str | None = None, full: bool
         agents = list(reversed(lineage))
     else:
         agents = sorted(created, key=_sort_key)
-    return "\n".join(line for agent_id in agents for line in describe(agent_id))
+    # Traces show short IDs. The legend gives each root's full ID, for revoking or searching.
+    legend = [f"{short_id(r)} = {r}" for r in dict.fromkeys(root_of(a) for a in agents) if short_id(r) != r]
+    body = "\n".join(line for agent_id in agents for line in describe(agent_id))
+    return "\n".join([*legend, "", body]) if legend else body
 

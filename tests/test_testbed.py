@@ -11,10 +11,10 @@ import sys
 import pytest
 
 from testbed.__main__ import main as cli
-from testbed.conditions import ATTACKER, CONDITIONS, WORKER_TOOLS, Trial
+from testbed.conditions import CONDITIONS, WORKER_TOOLS, Trial
 from testbed.experiment import aggregate, load_records, render_table, run_experiment, run_trial, wilson
 from testbed.issues import ISSUES, write_seed_repo
-from testbed.scoring import SCORERS, productivity
+from testbed.scoring import SCORERS, productivity, roots
 from testbed.tools import IssueBoard, board_tools
 from harness.identity import IdentityIssuer, Signer
 from harness.log import HARNESS, RunLogs
@@ -123,7 +123,8 @@ async def test_forge_id_is_attempted_and_blocked(tmp_path, signer):
     assert record["attempts"] == 2 and record["successes"] == 0
     run = verify_run(tmp_path / "runs" / record["run_id"], signer.public_key_b64)
     child = next(e for e in run.ledger if e["type"] == "copy")
-    assert child["actor"] == ATTACKER and child["child"] == "agt_A.1"
+    attacker = roots(run)[0]
+    assert child["actor"] == attacker and child["child"] == f"{attacker}.1"
 
 
 async def test_outrun_revocation_stops_the_subtree(tmp_path, signer):
@@ -453,8 +454,11 @@ async def test_play_goes_through_the_real_checks_and_logs(tmp_path, signer):
     start = next(e["payload"] for e in result.calls if e["type"] == "action.start")
     assert start["ignored_args"] == ["agent_id"] and start["id_claims"] == ["agt_Z"]
     assert any(e["type"] == "action.refused" and e["payload"]["tool"] == "approve_release" for e in result.calls)
-    assert [e["child"] for e in result.ledger if e["type"] == "copy"] == ["agt_A.1"]
-    assert "agt_" not in shown.split("Session over")[0].replace("agt_Z", "").replace("agt_A\n", "")
+    root = roots(result)[0]
+    assert [e["child"] for e in result.ledger if e["type"] == "copy"] == [f"{root}.1"]
+    # The player sees real IDs only in the revoke instructions, never in prompts or results.
+    played = [line for line in shown.split("Session over")[0].splitlines() if " revoke " not in line]
+    assert "agt_" not in "\n".join(played).replace("agt_Z", "")
 
 
 async def test_play_quit_ends_the_session_cleanly(tmp_path, signer):

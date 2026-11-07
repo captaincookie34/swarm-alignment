@@ -6,6 +6,8 @@ when no Docker daemon is available.
 """
 import asyncio
 import hashlib
+import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -13,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from harness.cli import main as cli_main
+from harness.identity import short_id
 from harness.runner import RootSpec, run_agents
 from harness.sandbox import DockerSandbox, diff_snapshots, parse_snapshot
 from harness.scripted import ScriptedModel, call, say
@@ -57,6 +60,44 @@ class LocalStandIn(DockerSandbox):
         }
 
 
+def test_workspace_moves_to_the_run_folder_by_rename(tmp_path):
+    from harness.sandbox import move_workspace
+
+    source = tmp_path / "ws-abc"
+    (source / "sub").mkdir(parents=True)
+    (source / "sub" / "a.txt").write_text("a")
+    move_workspace(source, tmp_path / "run_x" / "workspace")
+    assert (tmp_path / "run_x" / "workspace" / "sub" / "a.txt").read_text() == "a"
+    assert not source.exists()
+
+
+def test_fallback_copy_cant_be_tricked_by_what_agents_left(tmp_path, monkeypatch):
+    """Across disks the move copies. A planted FIFO must not hang it, and a symlink to a host
+    file must stay a link, not become a copy of the file."""
+    import harness.sandbox as sandbox
+
+    secret = tmp_path / "host_secret.txt"
+    secret.write_text("TOP SECRET")
+    source = tmp_path / "ws-abc"
+    source.mkdir()
+    (source / "code.py").write_text("x = 1\n")
+    (source / "link").symlink_to(secret)
+    (source / "linked_dir").symlink_to(tmp_path)
+    os.mkfifo(source / "trap")
+
+    def no_rename(*args):
+        raise OSError("cross-device link")
+
+    monkeypatch.setattr(sandbox.os, "rename", no_rename)
+    destination = tmp_path / "run_x" / "workspace"
+    sandbox.move_workspace(source, destination)
+    assert (destination / "code.py").read_text() == "x = 1\n"
+    assert (destination / "link").is_symlink() and os.readlink(destination / "link") == str(secret)
+    assert (destination / "linked_dir").is_symlink()
+    assert not (destination / "trap").exists()
+    assert not source.exists()
+
+
 def test_parse_snapshot():
     text = "abc123  ./a.txt\nL  /etc/passwd  ./link\ndef456  ./dir/b c.txt\n"
     assert parse_snapshot(text) == {"./a.txt": "abc123", "./link": "symlink:/etc/passwd", "./dir/b c.txt": "def456"}
@@ -83,7 +124,8 @@ async def test_file_changes_are_attributed_to_the_agent_that_made_them(tmp_path,
     result = verify_run(outcome.run_dir, signer.public_key_b64)
     assert result.status == VERIFIED, str(result)
     changed = {e["agent_id"]: list(e["payload"]["created"]) for e in of_type(result.calls, "files.changed")}
-    assert changed == {"agt_A.1": ["./a.txt"], "agt_A.2": ["./sub/b.txt"]}
+    root = outcome.roots[0].id
+    assert changed == {f"{root}.1": ["./a.txt"], f"{root}.2": ["./sub/b.txt"]}
     assert of_type(result.calls, "files.unattributed") == []
 
 
@@ -181,14 +223,17 @@ async def test_cli_trace_verify_revoke_and_exit_codes(tmp_path, capsys):
     assert cli_main([*base, "verify", outcome.run_id]) == 0
     assert "VERIFIED" in capsys.readouterr().out
 
-    assert cli_main([*base, "trace", outcome.run_id, "--agent", "agt_A.1"]) == 0
+    root = outcome.roots[0].id
+    assert cli_main([*base, "trace", outcome.run_id, "--agent", f"{root}.1"]) == 0
     out = capsys.readouterr().out
-    assert "agt_A  root" in out and "agt_A.1  copy" in out
+    # Traces show short IDs, with a legend giving each root's full ID.
+    assert f"{short_id(root)}  root" in out and f"{short_id(root + '.1')}  copy" in out
+    assert f"{short_id(root)} = {root}" in out
 
     assert cli_main([*base, "report", outcome.run_id]) == 0
     assert '"copy": 1' in capsys.readouterr().out
 
-    assert cli_main([*base, "revoke", outcome.run_id, "agt_A.1", "--no-cascade", "--reason", "test"]) == 0
+    assert cli_main([*base, "revoke", outcome.run_id, f"{root}.1", "--no-cascade", "--reason", "test"]) == 0
     assert "descendants" not in capsys.readouterr().out
     assert cli_main([*base, "revoke", outcome.run_id, "not-an-id"]) == 1
     capsys.readouterr()
@@ -226,7 +271,7 @@ async def test_trace_full_shows_prompts_and_responses(tmp_path, capsys):
     assert "TOOL CALL <- model: copy_agent" in full
     assert "TOOL RESULT -> model (copy_agent): Created child_1." in full
     assert "RESPONSE <- model: done" in full
-    child = full[full.index("agt_A.1  copy"):]
+    child = full[full.index(f"{short_id(outcome.roots[0].id + '.1')}  copy"):]
     assert "PROMPT -> model: c" in child and "RESPONSE <- model: c done" in child
 
 
@@ -381,7 +426,8 @@ async def test_docker_attributes_changes_under_parallel_agents(tmp_path, signer)
     outcome = await go("root", model, tmp_path, signer, sandbox=DockerSandbox())
     entries = verify_run(outcome.run_dir, signer.public_key_b64).calls
     changed = {e["agent_id"]: list(e["payload"]["created"]) for e in of_type(entries, "files.changed")}
-    assert changed == {"agt_A.1": ["./a.txt"], "agt_A.2": ["./sub/b.txt"]}
+    root = outcome.roots[0].id
+    assert changed == {f"{root}.1": ["./a.txt"], f"{root}.2": ["./sub/b.txt"]}
 
 
 # Counts live processes running `sleep 300`. The bracket stops this command matching itself.
@@ -407,7 +453,8 @@ async def test_docker_revocation_kills_a_running_command(tmp_path, signer):
 
     async def revoke_soon():
         await asyncio.sleep(2)
-        revoke(tmp_path / run_id, signer, "agt_A.1", reason="stop")
+        root = next(json.loads(line)["child"] for line in (tmp_path / run_id / "ledger.jsonl").read_text().splitlines())
+        revoke(tmp_path / run_id, signer, f"{root}.1", reason="stop")
         await asyncio.sleep(1)
         return [call("run_shell", command=COUNT_SLEEPERS)]
 
@@ -421,11 +468,12 @@ async def test_docker_revocation_kills_a_running_command(tmp_path, signer):
     outcome = await asyncio.wait_for(go("root", model, tmp_path, signer, sandbox=DockerSandbox(), run_id=run_id), 60)
     result = verify_run(outcome.run_dir, signer.public_key_b64)
     assert result.status == VERIFIED, str(result)
-    assert outcome.agents["agt_A.1"][0] == "revoked" and outcome.agents["agt_A.2"][0] == "completed"
-    b_shell = [e for e in of_type(result.calls, "action.end") if e["agent_id"] == "agt_A.2"]
+    root = outcome.roots[0].id
+    assert outcome.agents[f"{root}.1"][0] == "revoked" and outcome.agents[f"{root}.2"][0] == "completed"
+    b_shell = [e for e in of_type(result.calls, "action.end") if e["agent_id"] == f"{root}.2"]
     assert "stdout:\n0" in b_shell[0]["payload"]["result"]  # the killed command is really gone
     changed = [e for e in of_type(result.calls, "files.changed") if "./killed.txt" in e["payload"].get("created", {})]
-    assert changed and changed[0]["agent_id"] == "agt_A.1"
+    assert changed and changed[0]["agent_id"] == f"{root}.1"
 
 
 @docker
@@ -487,6 +535,23 @@ async def test_docker_dead_processes_are_reaped(tmp_path, signer):
         "sh -c 'sleep 0.1 & exit 0'; sleep 0.5; grep -l '^State:.*Z' /proc/[0-9]*/status 2>/dev/null | wc -l",
     )  # fmt: skip
     assert "stdout:\n0" in results[0]
+
+
+@docker
+@pytest.mark.docker
+async def test_docker_agents_cant_learn_the_run_or_host_from_the_mount(tmp_path, signer):
+    """A bind mount's source shows in /proc/self/mountinfo, so it must be a neutral folder."""
+    import getpass
+
+    probe = "cat /proc/self/mountinfo; echo hello > made.txt"
+    outcome, _, results = await _docker_shell(tmp_path, signer, probe)
+    mounts = results[0]
+    assert "/workspace" in mounts
+    assert outcome.run_id not in mounts
+    assert getpass.getuser() not in mounts
+    assert str(tmp_path) not in mounts
+    # The files still end up in the run folder.
+    assert (outcome.run_dir / "workspace" / "made.txt").read_text() == "hello\n"
 
 
 @docker

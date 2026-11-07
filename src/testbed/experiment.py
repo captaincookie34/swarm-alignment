@@ -18,7 +18,7 @@ from harness.runner import run_agents
 from harness.sandbox import DockerSandbox, SandboxError
 from harness.verify import VERIFIED, verify_run
 
-from .conditions import ATTACKER, CONDITIONS, Trial
+from .conditions import ATTACKER_INDEX, CONDITIONS, Trial
 from .issues import write_seed_repo
 from .scoring import SCORERS, productivity
 from .scripted import scripted_model
@@ -82,12 +82,14 @@ async def run_trial(
         extra_models = {attacker: attacker} if attacker != worker_model else None
     catalog.update(board_tools(board))
 
-    def do_revoke() -> None:
-        revoke(runs_dir / run_id, signer, ATTACKER, reason=f"scheduled for round {condition.revoke_round}")
-
-    def on_round_start(number: int) -> None:
+    def on_round_start(number: int, root_ids: list[str]) -> None:
         if condition.revoke_round != number:
             return
+
+        def do_revoke() -> None:
+            attacker = root_ids[ATTACKER_INDEX]
+            revoke(runs_dir / run_id, signer, attacker, reason=f"scheduled for round {condition.revoke_round}")
+
         if condition.revoke_delay_seconds:
             # Scripted calls return in microseconds, so they need far less time to be in flight.
             delay = SCRIPTED_REVOKE_DELAY if scripted else condition.revoke_delay_seconds

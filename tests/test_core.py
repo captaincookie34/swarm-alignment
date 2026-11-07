@@ -12,13 +12,16 @@ import pytest
 from harness.config import AgentConfig
 from harness.identity import (
     HEAD_DOMAIN,
+    TOKEN_DOMAIN,
     IdentityIssuer,
     IdentityToken,
     Signer,
     covers,
     depth_of,
     parent_of,
-    root_label,
+    fingerprint,
+    new_ulid,
+    short_id,
     root_of,
     verify_token,
 )
@@ -31,7 +34,7 @@ CONFIG = AgentConfig("m", "prompt", "", ("a", "b"))
 
 
 def make_run(tmp_path, signer, run_id="run_x", close=True):
-    """A small valid run: root agt_A, a spawned child and a copy."""
+    """A small valid run: a root, a spawned child and a copy."""
     issuer = IdentityIssuer(signer, run_id)
     run_dir = tmp_path / run_id
     logs = RunLogs(run_dir, signer, run_id)
@@ -80,22 +83,60 @@ def rebuild_chain(run_dir, name, change):
 # --- IDs: the design's table and rules ---
 
 
-def test_ids_match_the_design_table(signer):
+def test_ids_are_globally_unique_and_name_the_issuing_key(signer):
     issuer = IdentityIssuer(signer, "run_x")
     a, b = issuer.issue_root(), issuer.issue_root()
-    assert (a.id, b.id) == ("agt_A", "agt_B")
+    assert a.id != b.id
+    assert a.id.startswith(f"agt_{signer.fingerprint}_") and len(a.id) == len("agt_") + 6 + 1 + 26
     first, second = issuer.issue_child(a), issuer.issue_child(a)
-    assert (first.id, second.id) == ("agt_A.1", "agt_A.2")
+    assert (first.id, second.id) == (f"{a.id}.1", f"{a.id}.2")
     grandchild = issuer.issue_child(first)
-    assert grandchild.id == "agt_A.1.1"
-    assert issuer.issue_child(b).id == "agt_B.1"
-    assert parent_of("agt_A.1.1") == "agt_A.1" and root_of("agt_A.1.1") == "agt_A"
-    assert depth_of("agt_A.1.1.1") == 3
+    assert grandchild.id == f"{a.id}.1.1"
+    assert parent_of(grandchild.id) == first.id and root_of(grandchild.id) == a.id
+    assert depth_of(f"{a.id}.1.1.1") == 3
     assert verify_token(grandchild, signer.public_key_b64, "run_x")
 
 
-def test_root_labels_continue_past_z():
-    assert [root_label(i) for i in (0, 25, 26, 27)] == ["A", "Z", "AA", "AB"]
+def test_ids_are_unique_across_runs_and_harnesses(signer):
+    other = Signer.generate()
+    ids = {IdentityIssuer(key, f"run_{i}").issue_root().id for key in (signer, other) for i in range(500)}
+    assert len(ids) == 1000
+    assert {i.split("_")[1] for i in ids} == {signer.fingerprint, other.fingerprint}
+
+
+def test_ulids_sort_by_time():
+    assert new_ulid(1_700_000_000.000) < new_ulid(1_700_000_000.001) < new_ulid(1_800_000_000)
+    assert len(new_ulid()) == 26
+
+
+def test_an_id_must_name_the_key_that_signed_it(signer):
+    """Signed by the right key but naming another harness's fingerprint: rejected."""
+    other = Signer.generate()
+    unsigned = {"id": f"agt_{other.fingerprint}_{new_ulid()}", "run": "run_x", "issued_at": 1.0, "depth": 0}
+    token = IdentityToken(**unsigned, signature=signer.sign(TOKEN_DOMAIN, unsigned))
+    assert not verify_token(token, signer.public_key_b64)
+
+
+def test_old_format_ids_still_verify(signer):
+    """Runs recorded with agt_A IDs, like the committed sample trace, must keep verifying."""
+    unsigned = {"id": "agt_A.1", "run": "run_x", "issued_at": 1.0, "depth": 1}
+    token = IdentityToken(**unsigned, signature=signer.sign(TOKEN_DOMAIN, unsigned))
+    assert verify_token(token, signer.public_key_b64, "run_x")
+
+
+def test_a_written_in_id_is_flagged_whole(signer):
+    """Scoring counts IDs agents write into calls, so the whole ID must be caught, not agt_k7f2q9."""
+    from harness.identity import ID_CLAIM
+
+    target = f"{IdentityIssuer(signer, 'run_x').issue_root().id}.1"
+    assert ID_CLAIM.findall(f'{{"parent": "{target}", "note": "and agt_A.2"}}') == [target, "agt_A.2"]
+
+
+def test_short_ids_for_display(signer):
+    root = IdentityIssuer(signer, "run_x").issue_root()
+    assert short_id(f"{root.id}.1.2") == f"agt_…{root.id[-4:]}.1.2"
+    assert short_id("agt_A.1") == "agt_A.1"
+    assert fingerprint(signer.public_key_b64) == signer.fingerprint
 
 
 @pytest.mark.parametrize(
@@ -203,9 +244,10 @@ def test_clean_run_verifies_and_writes_two_logs(tmp_path, signer):
 
 def test_ledger_entry_has_every_field_the_design_lists(tmp_path, signer):
     run_dir, _ = make_run(tmp_path, signer)
+    root = json.loads(read_lines(run_dir, LEDGER)[0])
     entry = json.loads(read_lines(run_dir, LEDGER)[1])
     assert {"event_id", "ts", "round", "type", "actor", "child", "config_hash", "prev_hash"} <= set(entry)
-    assert (entry["type"], entry["actor"], entry["child"]) == ("spawn", "agt_A", "agt_A.1")
+    assert (entry["type"], entry["actor"], entry["child"]) == ("spawn", root["child"], f"{root['child']}.1")
 
 
 def test_dotenv_loads_keys_without_overriding_the_shell(tmp_path, monkeypatch):
@@ -571,8 +613,9 @@ def test_call_from_an_agent_not_in_the_ledger_is_rejected(tmp_path, signer):
 
 def test_call_before_the_ledger_recorded_the_agent_is_rejected(tmp_path, signer):
     def build(logs, issuer):
-        logs.call("agt_A", "action.start")
-        add(logs, "root", HARNESS, issuer.issue_root())
+        root = issuer.issue_root()
+        logs.call(root.id, "action.start")
+        add(logs, "root", HARNESS, root)
 
     assert "before the ledger" in lineage_run(tmp_path, signer, build).reason
 

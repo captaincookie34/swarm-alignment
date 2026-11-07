@@ -76,7 +76,7 @@ class Harness:
         model_settings: Callable[[str], dict] = lambda name: {},
         always_take_turns: bool = False,
         revocation_poll_seconds: float = 0.2,
-        on_round_start: Callable[[int], None] | None = None,
+        on_round_start: Callable[[int, list[str]], None] | None = None,  # (round, root IDs)
         narrow_child_tools: bool = False,
     ):
         self.run_dir = run_dir
@@ -359,7 +359,7 @@ class Harness:
             for number in range(1, self.budget.limits.max_rounds + 1):
                 self.logs.round = number
                 if self._on_round_start:
-                    self._on_round_start(number)
+                    self._on_round_start(number, [a for a in self.agents if "." not in a])
                 self._apply_revocations()
                 ready = self._ready()
                 if not ready:

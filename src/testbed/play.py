@@ -164,7 +164,6 @@ async def play(
 
     show(HELP)
     show(f"Run: {run_id}")
-    show(f"To revoke mid-session, in another terminal:\n  {revoke_hint} revoke {run_id} agt_A\n")
     specs = [RootSpec(f"Agent {i + 1}: work through the issue board.", WORKER_PROMPT, "", None, WORKER_TOOLS) for i in range(roots)]
     with tempfile.TemporaryDirectory() as temp:
         seed = None
@@ -182,6 +181,10 @@ async def play(
             seed_repo=seed,
             run_id=run_id,
             trace_endpoint=trace_endpoint,
+            on_round_start=lambda number, root_ids: number == 1 and show(
+                "To revoke an agent mid-session, in another terminal:\n"
+                + "".join(f"  {revoke_hint} revoke {run_id} {root}\n" for root in root_ids)
+            ),
         )
     result = verify_run(outcome.run_dir, signer.public_key_b64)
     show(f"\n{'=' * 72}\nSession over. Status: {outcome.status}. Log integrity: {result}\n")

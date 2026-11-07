@@ -9,6 +9,7 @@ pytest.importorskip("opentelemetry.sdk")
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter  # noqa: E402
 
 from harness.export import export_run  # noqa: E402
+from harness.identity import short_id  # noqa: E402
 from harness.runner import RootSpec, run_agents  # noqa: E402
 from harness.scripted import ScriptedModel, call, say  # noqa: E402
 from harness.verify import VERIFIED, verify_run  # noqa: E402
@@ -39,7 +40,11 @@ def children_of(spans, parent):
 async def test_agents_nest_by_lineage_with_their_config(tmp_path, signer):
     outcome, spans = await run_and_export(tmp_path, signer)
     by_name = {s.name: s for s in spans}
-    run, parent, child = by_name[f"run {outcome.run_id}"], by_name["agent agt_A"], by_name["agent agt_A.1"]
+    root = outcome.roots[0].id
+    # Span names use the short ID; attributes keep the full one.
+    run, parent = by_name[f"run {outcome.run_id}"], by_name[f"agent {short_id(root)}"]
+    child = by_name[f"agent {short_id(root + '.1')}"]
+    assert child.attributes["harness.agent.id"] == f"{root}.1"
     assert parent in children_of(spans, run) and child in children_of(spans, parent)
     assert child.attributes["harness.lineage.edge"] == "copy"
     assert child.attributes["harness.config.hash"] == parent.attributes["harness.config.hash"]
@@ -51,9 +56,10 @@ async def test_agents_nest_by_lineage_with_their_config(tmp_path, signer):
 
 async def test_model_calls_show_the_whole_conversation_the_model_saw(tmp_path, signer):
     """The log keeps only new messages each turn; the export rebuilds the full history."""
-    _, spans = await run_and_export(tmp_path, signer)
+    outcome, spans = await run_and_export(tmp_path, signer)
+    root = outcome.roots[0].id
     calls = sorted(
-        (s for s in spans if s.attributes.get("openinference.span.kind") == "LLM" and s.attributes["harness.agent.id"] == "agt_A"),
+        (s for s in spans if s.attributes.get("openinference.span.kind") == "LLM" and s.attributes["harness.agent.id"] == root),
         key=lambda s: s.start_time,
     )
     assert len(calls) == 3
@@ -71,10 +77,10 @@ async def test_model_calls_show_the_whole_conversation_the_model_saw(tmp_path, s
 
 
 async def test_tool_calls_and_refusals_are_spans_inside_their_round(tmp_path, signer):
-    _, spans = await run_and_export(tmp_path, signer)
+    outcome, spans = await run_and_export(tmp_path, signer)
     by_name = {s.name: s for s in spans}
     copy, refused = by_name["copy_agent"], by_name["REFUSED approve_release"]
-    round_one = by_name["agt_A round 1"]
+    round_one = by_name[f"{short_id(outcome.roots[0].id)} round 1"]
     assert copy in children_of(spans, round_one) and refused in children_of(spans, round_one)
     assert json.loads(copy.attributes["input.value"]) == {"task": "kid"}
     assert copy.attributes["output.value"] == "Created child_1."
@@ -114,7 +120,8 @@ async def test_trace_flag_exports_the_finished_run(tmp_path, signer):
     exporter = InMemorySpanExporter()
     outcome = await run_agents([RootSpec("root")], ScriptedModel(SCRIPTS), tmp_path, signer, trace_exporter=exporter)
     assert verify_run(outcome.run_dir, signer.public_key_b64).status == VERIFIED
-    assert {"agent agt_A", "agent agt_A.1"} <= {s.name for s in exporter.get_finished_spans()}
+    root = outcome.roots[0].id
+    assert {f"agent {short_id(root)}", f"agent {short_id(root + '.1')}"} <= {s.name for s in exporter.get_finished_spans()}
 
 
 async def test_a_viewer_thats_down_cant_break_the_run(tmp_path, signer):
