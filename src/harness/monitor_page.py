@@ -110,6 +110,17 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
 dialog button { border-radius: 6px; padding: 6px 14px; border: 1px solid var(--line); background: var(--panel-2); cursor: pointer; }
 dialog button.danger { background: var(--danger); border-color: var(--danger); color: #fff; font-weight: 600; }
 .err { color: var(--danger); font-size: 13px; min-height: 1em; }
+button.start { background: var(--accent); color: #0d1117; border: 0; border-radius: 6px; padding: 6px 14px; font-weight: 700; cursor: pointer; }
+button.start:hover { filter: brightness(1.1); }
+#start-dialog { width: min(720px, 94vw); }
+#start-dialog h3 { color: var(--text); }
+#start-dialog textarea { min-height: 190px; font-size: 13.5px; line-height: 1.5; }
+.fields { display: grid; grid-template-columns: 1fr 140px 110px; gap: 10px; }
+.fields label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.fields input { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font-family: var(--mono); font-size: 12.5px; }
+.hint { color: var(--muted); font-size: 12px; }
+.hint code { font-family: var(--mono); color: var(--text); }
+#toast.info { background: var(--accent); color: #0d1117; }
 #toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--danger); color: #fff; padding: 10px 18px;
   border-radius: 8px; font-weight: 600; box-shadow: 0 8px 30px rgba(0,0,0,.5); opacity: 0; transition: opacity .25s; pointer-events: none; }
 #toast.show { opacity: 1; }
@@ -124,6 +135,7 @@ dialog button.danger { background: var(--danger); border-color: var(--danger); c
 <body>
 <header>
   <h1>Harness monitor <span>· live agents</span></h1>
+  <button class="start" id="new-run">▶ New run</button>
   <select id="run" aria-label="Run"></select>
   <label class="toggle"><input type="checkbox" id="follow" checked> follow newest run</label>
   <span id="status" class="pill">no run</span>
@@ -134,7 +146,7 @@ dialog button.danger { background: var(--danger); border-color: var(--danger); c
     <h2>Agents and lineage <span class="count" id="agent-count"></span></h2>
     <div class="legend">Each ID is issued and signed by the harness, and agents never see their own:
       <code><span class="idk">agt_&lt;key&gt;_</span><span class="idr">&lt;root's unique ID&gt;</span><span class="idp">.child.grandchild</span></code></div>
-    <div class="scroll" id="agents"><div class="empty">Waiting for a run. Start one with <code>harness run</code>, or use <code>harness monitor --demo</code>.</div></div>
+    <div class="scroll" id="agents"><div class="empty">Waiting for a run. Press <b>▶ New run</b> to start one, or use <code>harness run</code> in a terminal.</div></div>
   </section>
   <section id="feed-panel">
     <h2>Live requests <span class="count" id="event-count"></span>
@@ -156,6 +168,21 @@ dialog button.danger { background: var(--danger); border-color: var(--danger); c
     <div><div style="color: var(--muted); font-size: 12px; margin-bottom: 4px">These IDs will be revoked:</div><div id="kill-list"></div></div>
     <div class="err" id="flag-error"></div>
     <div class="actions"><button value="cancel" formnovalidate>Cancel</button><button class="danger" id="confirm" value="ok">Flag &amp; kill</button></div>
+  </form>
+</dialog>
+<dialog id="start-dialog">
+  <form method="dialog" id="start-form">
+    <h3>Start a run</h3>
+    <div class="hint">The root agent gets this prompt and the tools <code>write_line(text, notebook)</code>, <code>spawn_agent</code> and <code>send_message</code>. Up to 4 agents, 2 generations deep. The default prompt asks it to spawn a helper.</div>
+    <textarea id="start-task" required></textarea>
+    <div class="fields">
+      <label>Model<input id="start-model"></label>
+      <label>Token cap for the run<input id="start-tokens" type="number" min="1000" step="1000"></label>
+      <label>Seconds per write<input id="start-pace" type="number" min="0" max="10" step="0.5"></label>
+    </div>
+    <div class="hint" id="start-cost"></div>
+    <div class="err" id="start-error"></div>
+    <div class="actions"><button type="button" id="start-reset">Use the default prompt</button><button value="cancel" formnovalidate>Cancel</button><button class="start" id="start-go" value="ok">Start</button></div>
   </form>
 </dialog>
 <div id="toast"></div>
@@ -293,7 +320,40 @@ function renderThreats() {
     <td class="${t.verified ? "ok-text" : "bad-text"}">${t.verified ? "✓ signed" : "✗ invalid"}</td></tr>`).join("");
 }
 
-function toast(text) { const t = $("toast"); t.textContent = text; t.classList.add("show"); setTimeout(() => t.classList.remove("show"), 2600); }
+function toast(text, kind = "") { const t = $("toast"); t.textContent = text; t.className = `show ${kind}`; setTimeout(() => t.classList.remove("show"), 2600); }
+
+let defaults = null;
+function costHint() {
+  const cap = Number($("start-tokens").value) || 0, model = $("start-model").value.trim();
+  $("start-cost").textContent = model === defaults.model
+    ? `Hard cap: ${cap.toLocaleString()} tokens. Claude Haiku 5.5 costs $0.10 per million input tokens and $0.50 per million output, and most tokens here are input, so a run that hits the cap costs about $${(cap * 0.11 / 1e6).toFixed(3)}.`
+    : `Hard cap: ${cap.toLocaleString()} tokens. Check this model's price with its provider.`;
+}
+$("new-run").addEventListener("click", async () => {
+  defaults = defaults || await api("/api/defaults");
+  if (!$("start-task").value) $("start-task").value = defaults.task;
+  if (!$("start-model").value) $("start-model").value = defaults.model;
+  if (!$("start-tokens").value) $("start-tokens").value = defaults.max_tokens;
+  if (!$("start-pace").value) $("start-pace").value = defaults.pace;
+  $("start-error").textContent = ""; costHint();
+  $("start-dialog").showModal(); $("start-task").focus();
+});
+$("start-reset").addEventListener("click", () => { $("start-task").value = defaults.task; });
+$("start-tokens").addEventListener("input", costHint);
+$("start-model").addEventListener("input", costHint);
+$("start-form").addEventListener("submit", async (ev) => {
+  if (ev.submitter && ev.submitter.value !== "ok") return;
+  ev.preventDefault();
+  $("start-go").disabled = true; $("start-error").textContent = "Starting…";
+  try {
+    const {run: id} = await api("/api/start", {
+      method: "POST", headers: {"Content-Type": "application/json", "X-Harness-Monitor": "1"},
+      body: JSON.stringify({task: $("start-task").value, model: $("start-model").value, max_tokens: Number($("start-tokens").value), pace: Number($("start-pace").value)}),
+    });
+    $("start-dialog").close(); $("follow").checked = true; switchRun(id); toast(`Started ${id}`, "info"); poll();
+  } catch (e) { $("start-error").textContent = e.message; }
+  finally { $("start-go").disabled = false; }
+});
 
 document.addEventListener("click", (ev) => {
   const kill = ev.target.closest("[data-kill]");
@@ -342,6 +402,7 @@ async function tick() {
   setTimeout(tick, 1000);
 }
 tick();
+if (location.hash === "#new") $("new-run").click();  // a link that opens straight to New run
 </script>
 </body>
 </html>

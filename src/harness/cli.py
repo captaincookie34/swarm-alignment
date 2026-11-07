@@ -144,6 +144,7 @@ def cmd_monitor(args: argparse.Namespace) -> int:
         return 1
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     print(f"monitor: {url}  (watching {args.runs_dir}/, Ctrl-C to stop)")
+    print("Start a run from the page with New run, or from another terminal with harness run.")
     if not args.no_browser:
         webbrowser.open(url)
     try:
@@ -166,8 +167,7 @@ def cmd_monitor(args: argparse.Namespace) -> int:
 
 def _live(args: argparse.Namespace, signer: Signer) -> None:
     """A real agent and the helpers it spawns write into notebooks. Afterwards, show how far each got."""
-    from .monitor import read_jsonl
-    from .monitor_demo import live_task, notebooks, run_live
+    from .monitor_demo import live_summary, live_task, run_live
     from .runner import resolve_model
 
     resolve_model(args.live)  # a missing key fails here, before a run exists
@@ -177,20 +177,8 @@ def _live(args: argparse.Namespace, signer: Signer) -> None:
     print("Flag an agent in the page part-way through to stop it.\n")
     outcome = asyncio.run(run_live(args.runs_dir, signer, args.live, args.target, args.pace or 2.0, args.max_tokens, args.task))
     run_dir = args.runs_dir / outcome.run_id
-    calls = read_jsonl(run_dir / "calls.jsonl")
-    tokens = next((e["payload"].get("run_tokens", 0) for e in reversed(calls) if e["type"] == "run.end"), 0)
-    print(f"\nrun {outcome.run_id}: {outcome.status}, {tokens:,} tokens")
-    for agent_id, (status, _) in outcome.agents.items():
-        print(f"  {agent_id}: {status}")
-    for name, lines in notebooks(run_dir).items():
-        print(f"notebook {name}: {len(lines)} lines" + (f", {lines[0]} to {lines[-1]}" if lines else ""))
-    revoked = {e["agent_id"]: e["seq"] for e in calls if e["type"] == "agent.revoked"}
-    if revoked:
-        after = [e for e in calls if e["agent_id"] in revoked and e["seq"] > revoked[e["agent_id"]] and e["type"] in ("action.start", "model.request")]
-        refused = [e for e in calls if e["agent_id"] in revoked and e["type"] == "action.refused" and "revoked" in str(e["payload"].get("reason", ""))]
-        print(f"after the kill: {len(after)} tool calls or model requests by killed agents went through, {len(refused)} refused")
-    result = verify_run(run_dir, signer.public_key_b64)
-    print(f"integrity: {result}\nNext: harness trace {outcome.run_id}   or   ls {run_dir / 'workspace' / 'notebooks'}")
+    print("\n" + "\n".join(live_summary(run_dir, outcome, signer.public_key_b64)))
+    print(f"Next: harness trace {outcome.run_id}   or   ls {run_dir / 'workspace' / 'notebooks'}")
 
 
 def add_trace_argument(parser: argparse.ArgumentParser) -> None:

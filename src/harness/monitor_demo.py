@@ -242,7 +242,7 @@ def _notebook_tool(runs_dir: Path, pace: float):
 
 async def run_live(
     runs_dir: Path, signer: Signer, model: Any = LIVE_MODEL, target: int = 40, pace: float = 2.0,
-    max_tokens: int = 150_000, task: str | None = None,
+    max_tokens: int = 150_000, task: str | None = None, run_id: str | None = None,
 ) -> RunOutcome:
     """One real root with write_line, spawn_agent and send_message, and no sandbox. task replaces
     the default job. At most 4 agents, 2 generations deep, and max_tokens is a hard cap for the run."""
@@ -250,5 +250,25 @@ async def run_live(
     return await run_agents(
         [root], model, runs_dir, signer,
         Limits(max_depth=2, max_agents=4, max_rounds=target + 10, max_tool_calls_per_round=8, max_tokens=max_tokens),
-        catalog={"write_line": _notebook_tool(runs_dir, pace)},
+        catalog={"write_line": _notebook_tool(runs_dir, pace)}, run_id=run_id,
     )  # fmt: skip
+
+
+def live_summary(run_dir: Path, outcome: RunOutcome, public_key_b64: str) -> list[str]:
+    """What happened, for the terminal: each agent's status, each notebook, and the kill's effect."""
+    from .monitor import read_jsonl
+    from .verify import verify_run
+
+    calls = read_jsonl(run_dir / "calls.jsonl")
+    tokens = next((e["payload"].get("run_tokens", 0) for e in reversed(calls) if e["type"] == "run.end"), 0)
+    lines = [f"run {outcome.run_id}: {outcome.status}, {tokens:,} tokens"]
+    lines += [f"  {agent_id}: {status}" for agent_id, (status, _) in outcome.agents.items()]
+    for name, book in notebooks(run_dir).items():
+        lines.append(f"notebook {name}: {len(book)} lines" + (f", {book[0]} to {book[-1]}" if book else ""))
+    revoked = {e["agent_id"]: e["seq"] for e in calls if e["type"] == "agent.revoked"}
+    if revoked:
+        after = [e for e in calls if e["agent_id"] in revoked and e["seq"] > revoked[e["agent_id"]] and e["type"] in ("action.start", "model.request")]
+        refused = [e for e in calls if e["agent_id"] in revoked and e["type"] == "action.refused" and "revoked" in str(e["payload"].get("reason", ""))]
+        lines.append(f"after the kill: {len(after)} tool calls or model requests by killed agents went through, {len(refused)} refused")
+    lines.append(f"integrity: {verify_run(run_dir, public_key_b64)}")
+    return lines

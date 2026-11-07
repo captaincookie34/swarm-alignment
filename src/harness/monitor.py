@@ -13,9 +13,11 @@ another website open in the browser can't send one.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -235,9 +237,51 @@ def _name_children(events: list[dict], calls: list[dict], ledger: list[dict]) ->
 class Monitor:
     """What the HTTP handler needs: where runs live and the key that may revoke in them."""
 
-    def __init__(self, runs_dir: Path, signer: Signer):
+    def __init__(self, runs_dir: Path, signer: Signer, model_override: Any = None, log=print):
         self.runs_dir = runs_dir
         self.signer = signer
+        self.model_override = model_override  # tests use a scripted model here
+        self.log = log
+        self._started: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+    def defaults(self) -> dict:
+        from .monitor_demo import LIVE_MODEL, live_task
+
+        return {"task": live_task(40), "model": LIVE_MODEL, "max_tokens": 150_000, "pace": 2.0}
+
+    def start(self, task: str, model: str = "", max_tokens: int = 150_000, pace: float = 2.0) -> str:
+        """Start a live run from the page, in its own thread. One at a time, since each one costs money."""
+        from .identity import new_run_id
+        from .monitor_demo import LIVE_MODEL, live_summary, run_live
+        from .runner import resolve_model
+
+        task = task.strip()
+        if not task:
+            raise ValueError("give the agent a prompt")
+        if len(task) > 8_000:
+            raise ValueError("keep the prompt under 8,000 characters")
+        max_tokens = max(1_000, min(int(max_tokens), 2_000_000))
+        pace = max(0.0, min(float(pace), 10.0))
+        spec = self.model_override or model.strip() or LIVE_MODEL
+        with self._lock:
+            if self._started and self._started.is_alive():
+                raise ValueError("a run started from this page is still going. Flag it or wait for it to end first")
+            if isinstance(spec, str):
+                resolve_model(spec)  # a bad name or missing key fails here, before a run exists
+            run_id = new_run_id()
+
+            def work() -> None:
+                outcome = asyncio.run(run_live(self.runs_dir, self.signer, spec, pace=pace, max_tokens=max_tokens, task=task, run_id=run_id))
+                self.log("\n" + "\n".join(live_summary(self.runs_dir / run_id, outcome, self.signer.public_key_b64)))
+
+            self._started = threading.Thread(target=work, daemon=True, name=f"harness-run-{run_id}")
+            self._started.start()
+        deadline = time.time() + 10  # wait for the run directory, so the page can switch to it
+        while not (self.runs_dir / run_id / "calls.jsonl").exists() and self._started.is_alive() and time.time() < deadline:
+            time.sleep(0.05)
+        self.log(f"started {run_id} on {spec if isinstance(spec, str) else 'a scripted model'}, capped at {max_tokens:,} tokens")
+        return run_id
 
     def run_dir(self, name: str) -> Path | None:
         if not RUN_NAME.match(name):
@@ -301,6 +345,8 @@ def make_handler(monitor: Monitor) -> type[BaseHTTPRequestHandler]:
                 return self._send(HTTPStatus.OK, PAGE, "text/html")
             if parts == ["api", "runs"]:
                 return self._send(HTTPStatus.OK, {"runs": list_runs(monitor.runs_dir)})
+            if parts == ["api", "defaults"]:
+                return self._send(HTTPStatus.OK, monitor.defaults())
             if len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "state":
                 if (run_dir := self._run(parts)) is None:
                     return
@@ -312,6 +358,13 @@ def make_handler(monitor: Monitor) -> type[BaseHTTPRequestHandler]:
             if not self._local() or self.headers.get(FLAG_HEADER) != "1":
                 return self._send(HTTPStatus.FORBIDDEN, {"error": "local requests from the monitor page only"})
             parts = [p for p in urlparse(self.path).path.split("/") if p]
+            if parts == ["api", "start"]:
+                try:
+                    body = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length", 0)), 20_000)))
+                    run_id = monitor.start(str(body.get("task", "")), str(body.get("model", "")), body.get("max_tokens", 150_000), body.get("pace", 2.0))
+                except Exception as exc:  # e.g. a missing API key: show it on the page
+                    return self._send(HTTPStatus.BAD_REQUEST, {"error": f"{type(exc).__name__}: {exc}" if not isinstance(exc, ValueError) else str(exc)})
+                return self._send(HTTPStatus.OK, {"run": run_id})
             if not (len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "flag"):
                 return self._send(HTTPStatus.NOT_FOUND, {"error": "not found"})
             if (run_dir := self._run(parts)) is None:
@@ -326,9 +379,9 @@ def make_handler(monitor: Monitor) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-def serve(runs_dir: Path, signer: Signer, port: int = DEFAULT_PORT) -> ThreadingHTTPServer:
+def serve(runs_dir: Path, signer: Signer, port: int = DEFAULT_PORT, model_override: Any = None) -> ThreadingHTTPServer:
     """Start the monitor in a background thread and return the server (call shutdown() to stop)."""
     runs_dir.mkdir(parents=True, exist_ok=True)
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(Monitor(runs_dir, signer)))
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(Monitor(runs_dir, signer, model_override)))
     threading.Thread(target=server.serve_forever, daemon=True, name="harness-monitor").start()
     return server

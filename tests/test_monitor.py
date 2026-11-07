@@ -1,5 +1,6 @@
 """The live monitor, its HTTP API, flagging and the threat log, on the offline demo run."""
 import asyncio
+import time
 import json
 import urllib.error
 import urllib.request
@@ -194,3 +195,50 @@ def test_a_custom_live_task_replaces_the_default(tmp_path):
     outcome = asyncio.run(run_live(tmp_path / "runs", Signer.generate(), model, task="Say hi.", pace=0))
     ledger = read_jsonl(tmp_path / "runs" / outcome.run_id / "ledger.jsonl")
     assert ledger[0]["task"] == "Say hi." and set(ledger[0]["config"]["tools"]) == set(LIVE_TOOLS)
+
+
+def test_the_page_can_start_a_run_with_any_prompt_one_at_a_time(tmp_path):
+    from harness.monitor_demo import LIVE_MODEL, live_task, notebooks
+    from harness.scripted import ScriptedModel, call
+
+    numbers = iter(range(1, 10_000))
+    task = "Write numbers into the notebook n, forever."
+    model = ScriptedModel({task: [lambda: [call("write_line", text=str(next(numbers)), notebook="n")]]})
+    runs, signer = tmp_path / "runs", Signer.generate()
+    server = serve(runs, signer, 0, model_override=model)
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+
+    def request(path, body=None, header=True):
+        req = urllib.request.Request(base + path, json.dumps(body).encode() if body is not None else None,
+                                     {"Content-Type": "application/json", **({"X-Harness-Monitor": "1"} if header else {})})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    try:
+        status, defaults = request("/api/defaults")
+        assert status == 200 and defaults["task"] == live_task(40) and defaults["model"] == LIVE_MODEL
+        assert "spawn_agent" in defaults["task"]
+        assert request("/api/start", {"task": task}, header=False)[0] == 403
+        assert request("/api/start", {"task": "   "})[0] == 400
+        status, body = request("/api/start", {"task": task, "pace": 0.01, "max_tokens": 500_000})
+        assert status == 200
+        run_id = body["run"]
+        assert request("/api/start", {"task": task})[1]["error"].startswith("a run started from this page is still going")
+        run_dir = runs / run_id
+        ledger = read_jsonl(run_dir / "ledger.jsonl")
+        assert ledger[0]["task"] == task
+        while len(notebooks(run_dir).get("n", [])) < 3:
+            time.sleep(0.02)
+        root = ledger[0]["child"]
+        assert request(f"/api/runs/{run_id}/flag", {"agent_id": root, "reason": "enough"})[0] == 200
+        deadline = time.time() + 10
+        while request(f"/api/runs/{run_id}/state?after=-1")[1]["running"] and time.time() < deadline:
+            time.sleep(0.05)
+        state = request(f"/api/runs/{run_id}/state?after=-1")[1]
+        assert not state["running"] and state["agents"][0]["status"] == "revoked"
+        assert verify_run(run_dir, signer.public_key_b64).status == VERIFIED
+    finally:
+        server.shutdown()

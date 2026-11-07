@@ -91,7 +91,7 @@ To give roots different configs, such as a red-team root on another model, use `
 Each `harness run` is stored in `runs/<run ID>/`, and each testbed trial in `<--out folder>/runs/<run ID>/`: `ledger.jsonl`, `calls.jsonl`, their signed heads, `revocations.jsonl` and `workspace/`. Agents can reach only `workspace/`.
 
 ## Watching a run live and killing agents
-`harness monitor` opens a local page that shows every agent and its requests as they happen. If an agent looks like a threat, click **Flag & kill**, give a reason, and the harness stops it, and by default everything it created, at their next step.
+`harness monitor` opens a local page that shows every agent and its requests as they happen. Press **▶ New run** to start a run on a real model with any prompt: it opens with a default prompt that asks the agent to spawn a helper, a token cap and a cost estimate. One page-started run goes at a time. If an agent looks like a threat, click **Flag & kill**, give a reason, and the harness stops it, and by default everything it created, at their next step.
 
 ```bash
 .venv/bin/harness monitor --demo     # try it offline: two workers and a rogue agent, no API key or Docker
