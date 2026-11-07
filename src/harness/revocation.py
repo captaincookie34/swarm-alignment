@@ -1,6 +1,6 @@
 """Signed revocation list. By default, revoking an ID also covers all its descendants.
 
-The list is a file so a separate process (`traceable revoke`) can revoke during a run.
+The list is a file so a separate process (`harness revoke`) can revoke during a run.
 Entries with bad signatures are ignored at runtime, so writing to the file without the
 key can't stop an agent. The verifier reports them as tampering.
 

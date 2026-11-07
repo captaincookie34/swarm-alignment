@@ -18,12 +18,14 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
-DEFAULT_KEY_DIR = Path.home() / ".config" / "traceable"
+DEFAULT_KEY_DIR = Path.home() / ".config" / "harness"
 ID_PATTERN = re.compile(r"^agt_[A-Z]+(\.[1-9][0-9]*)*$")
 # Finds ID-like text in free-form strings, to flag claims a model makes about identity.
 ID_CLAIM = re.compile(r"\bagt_[A-Za-z0-9]+(?:\.[0-9]+)*\b")
 
 # Domain separation: a signature made for one purpose can't be replayed as another.
+# These strings are part of the signature format, so they keep the project's original name:
+# changing them would make every existing run fail verification.
 TOKEN_DOMAIN = b"traceable-token-v1\0"
 HEAD_DOMAIN = b"traceable-head-v1\0"
 REVOCATION_DOMAIN = b"traceable-revocation-v1\0"

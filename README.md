@@ -14,19 +14,22 @@ python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 
 # Offline: no API key, Docker or credits needed
-.venv/bin/python demo/demo.py
-.venv/bin/python -m pytest          # Docker tests skip if the daemon is down
+.venv/bin/python -m pytest                       # Docker tests skip if the daemon is down
+.venv/bin/python -m testbed play --offline       # play an agent yourself and try to cheat
 
 # A live run (needs Docker running and an API key)
-export ANTHROPIC_API_KEY=...
-.venv/bin/traceable keygen
-.venv/bin/traceable run "Your task here" "A second root's task" --seed-repo path/to/repo
+cp .env.example .env                  # then add your OPENROUTER_API_KEY
+.venv/bin/harness keygen
+.venv/bin/harness run "Your task here" "A second root's task" --seed-repo path/to/repo
 ```
 
 Choosing a model:
 ```bash
---model anthropic:claude-opus-5-5                          # needs ANTHROPIC_API_KEY
---model alibaba:qwen-max                                   # needs DASHSCOPE_API_KEY
+--model openrouter:anthropic/claude-opus-5.5               # the default; needs OPENROUTER_API_KEY
+--model openrouter:anthropic/claude-haiku-5.5              # much cheaper, through OpenRouter
+--model openrouter:qwen/qwen3.5-122b-a10b                  # the design's attacker model, through OpenRouter
+--model anthropic:claude-opus-5-5                          # direct to Anthropic; needs ANTHROPIC_API_KEY
+--model alibaba:qwen-max                                   # direct to DashScope; needs DASHSCOPE_API_KEY
 --model "endpoint:<model>@https://<host>/v1"               # any OpenAI-compatible endpoint, e.g. a dedicated
                                                            # Hugging Face endpoint; needs HF_TOKEN
 ```
@@ -41,13 +44,39 @@ To give roots different configs, such as a red-team root on another model, use `
 
 | Command | Purpose |
 |---|---|
-| `traceable run "task" ...` | Start one root per task, and run rounds until there's nothing to do or a limit is reached |
-| `traceable trace <run> [--agent agt_A.1]` | Show the lineage tree and each agent's steps, or one agent's lineage |
-| `traceable report <run>` | Print a verified run's measures as JSON |
-| `traceable verify <run>` | Check integrity. Exit code 0 `VERIFIED`, 1 `TAMPERED`, 2 `INCOMPLETE` |
-| `traceable revoke <run> <agent ID> [--no-cascade]` | Revoke an ID and, by default, its descendants, also during a run |
+| `harness run "task" ...` | Start one root per task, and run rounds until there's nothing to do or a limit is reached |
+| `harness trace <run> [--agent agt_A.1]` | Show the lineage tree and each agent's steps, or one agent's lineage |
+| `harness report <run>` | Print a verified run's measures as JSON |
+| `harness verify <run>` | Check integrity. Exit code 0 `VERIFIED`, 1 `TAMPERED`, 2 `INCOMPLETE` |
+| `harness revoke <run> <agent ID> [--no-cascade]` | Revoke an ID and, by default, its descendants, also during a run |
 
 Each run is stored in `runs/<run ID>/`: `ledger.jsonl`, `calls.jsonl`, their signed heads, `revocations.jsonl` and `workspace/`. Agents can reach only `workspace/`.
+
+## Viewing runs in Phoenix
+Runs can be viewed in [Phoenix](https://github.com/Arize-ai/phoenix), an open-source trace viewer that runs locally in Docker. `harness export` rebuilds a verified run's logs as [OpenTelemetry](https://opentelemetry.io/) traces: OpenInference spans, which Phoenix shows natively, plus GenAI attributes.
+
+```bash
+.venv/bin/pip install -e ".[trace]"     # one time
+docker run -d --rm --name harness-phoenix -p 6006:6006 \
+    -v harness-phoenix-data:/root/.phoenix arizephoenix/phoenix:version-20.26.1
+
+harness export --all                    # every run already in runs/
+harness export run_e8464be8ec           # or particular runs
+harness run "Your task" --trace         # or send a new run when it finishes
+```
+Then open http://localhost:6006 and choose the `harness` project. Each run is one trace:
+- **Agents:** each agent is a span named for its ID, nested under its parent's, so the trace shows the lineage tree. Its config, task and final output are attached.
+- **Model calls:** each call shows the whole conversation the model saw, then its reply, model name and tokens. The log stores only what's new each turn, and the export rebuilds the rest.
+- **Tool calls:** each call is a span with its arguments and result. Refused calls are red `REFUSED` spans with the reason.
+- **Events:** messages, file changes, revocations and other log entries are attached to the span they belong to.
+- **Filtering:** spans carry `harness.agent.id`, `harness.lineage.edge` and `harness.config.hash` attributes.
+
+`--trace` also works with `python -m testbed run` and `python -m testbed play`. Both `--trace URL` and `export --endpoint URL` can send to another viewer.
+
+- **Volume:** keeps traces when Phoenix restarts. `docker stop harness-phoenix` stops it.
+- **Re-exports:** sending a run again doesn't duplicate it, but Phoenix also keeps its first copy. To refresh traces after changing the exporter, delete the `harness` project in Phoenix and export again.
+
+**Traces are a view, not the record.** Only runs that verify are exported, but traces aren't signed, so check anything that matters with `harness verify`. If Phoenix isn't running, a run still completes normally.
 
 ## How a run works
 Work happens in rounds. Each round, every agent with something to do takes a turn, in parallel, of up to `--max-tool-calls` tool calls. Agents created during a round start in the next one and their parent doesn't wait for them, so an original and its modified child both keep running. Messages also arrive next round.
@@ -69,12 +98,12 @@ Agents address each other by per-agent aliases (`parent`, `child_1`, `peer_1`, o
 IDs follow the design: `agt_A`, `agt_B` for roots and `agt_A.1`, `agt_A.1.1` for children. They repeat between runs, so a signed token includes its run ID.
 
 ## What it guarantees
-- **IDs can't be forged.** Only the holder of the signing key (`~/.config/traceable/`, never mounted into the sandbox) can issue them. A token with a bad signature is refused at call time and fails verification.
+- **IDs can't be forged.** Only the holder of the signing key (`~/.config/harness/`, never mounted into the sandbox) can issue them. A token with a bad signature is refused at call time and fails verification.
 - **Written-in IDs are ignored.** Tool arguments the tool doesn't define are dropped before validation, and the call runs as the real caller. Attempts are recorded as `ignored_args` and `id_claims`.
 - **Actions are recorded first.** `action.start` is on disk before a tool runs, and a child's ledger entry before it exists. If a log can't be written, the action doesn't run.
 - **Tampering is detected.** Edits, reordering, deletions, additions and cut-off tails in either log all give `TAMPERED`. The verifier also checks lineage: tokens, parents, config hashes, and that no agent acted before the ledger recorded it.
 - **Spawning is bounded.** Depth (3 below the root), agents per run, spawn, copy and modify per agent per round, and a shared token budget are enforced by the harness.
-- **Revocation cascades.** Revoking `agt_A.1` also blocks `agt_A.1.1`, but not `agt_A.10` or siblings. Refused calls are logged, and `traceable report` counts them.
+- **Revocation cascades.** Revoking `agt_A.1` also blocks `agt_A.1.1`, but not `agt_A.10` or siblings. Refused calls are logged, and `harness report` counts them.
 - **Agents are sandboxed.** Tools run in a Docker container with no network and a read-only filesystem outside the workspace and `/tmp`. File changes are logged under the agent that made them.
 
 ## Known limits

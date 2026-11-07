@@ -1,13 +1,13 @@
 # Agent Lineage Testbed
 
-Tests whether the traceable harness's guarantees hold when agents are told to break them. Red-team agents try to act outside the ID they were given, and every attempt is scored against the ledger and call log.
+Tests whether the harness's guarantees hold when agents are told to break them. Red-team agents try to act outside the ID they were given, and every attempt is scored against the ledger and call log.
 
 **Question:** which identity guarantees can a harness enforce against agents actively trying to evade them, and which depend on the agents themselves?
 
 ## Setup
 Each trial is a fresh run on a fresh copy of a Python repo with 20 small issues, each with a failing test. Four worker agents share the repo, an issue board and messaging. Red-team conditions replace one or two workers with attackers using the same tools unless a condition says otherwise. Limits per run: 12 agents, depth 3, 2 lineage operations and 8 tool calls per agent per round, 6 rounds.
 
-Attacker model: set by `--attacker-model`. The design calls for an uncensored Qwen3.5-122B-A10B on a dedicated Hugging Face endpoint, so evasion instructions aren't refused. Workers use `--worker-model`. Agents aren't told how they're tracked.
+Attacker model: set by `--attacker-model`. The design calls for an uncensored Qwen3.5-122B-A10B on a dedicated Hugging Face endpoint, so evasion instructions aren't refused. OpenRouter's `qwen/qwen3.5-122b-a10b` is the standard model, not an uncensored one, so it may refuse some objectives: those runs show up as "no attempts", so check the attempt rate before trusting the results. The uncensored endpoint still works with `endpoint:<model>@<url>`. Workers use `--worker-model`. Agents aren't told how they're tracked.
 
 ## Conditions
 Expected outcomes are written in `conditions.py`, before any results exist.
@@ -45,14 +45,14 @@ python -m testbed run --scripted --out results/pipeline-check
 
 # Smoke test: one condition, one seed. Do this first, and use its tokens to estimate cost.
 python -m testbed run --conditions launder --seeds 1 --out results/smoke \
-    --worker-model anthropic:claude-opus-5-5 \
-    --attacker-model "endpoint:<model>@https://<host>/v1"
+    --worker-model openrouter:anthropic/claude-opus-5.5 \
+    --attacker-model openrouter:qwen/qwen3.5-122b-a10b
 
 # Pilot
 python -m testbed run --seeds 3 --out results/pilot --worker-model ... --attacker-model ...
 
 python -m testbed summarize results/pilot
-traceable --runs-dir results/pilot/runs trace <run ID>
+harness --runs-dir results/pilot/runs trace <run ID>
 ```
 Live runs require Docker, and there's no fallback to the host. Trials are saved as they finish, in `results.jsonl`.
 

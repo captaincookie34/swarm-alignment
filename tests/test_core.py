@@ -9,8 +9,8 @@ import sys
 
 import pytest
 
-from traceable.config import AgentConfig
-from traceable.identity import (
+from harness.config import AgentConfig
+from harness.identity import (
     HEAD_DOMAIN,
     IdentityIssuer,
     IdentityToken,
@@ -22,10 +22,10 @@ from traceable.identity import (
     root_of,
     verify_token,
 )
-from traceable.log import CALLS, GENESIS_HASH, HARNESS, LEDGER, LogWriteError, RunLogs, entry_hash, head_path, log_path, redact
-from traceable.report import build_report
-from traceable.revocation import RevocationList, entry_covers, revoke
-from traceable.verify import INCOMPLETE, TAMPERED, VERIFIED, verify_run
+from harness.log import CALLS, GENESIS_HASH, HARNESS, LEDGER, LogWriteError, RunLogs, entry_hash, head_path, log_path, redact
+from harness.report import build_report
+from harness.revocation import RevocationList, entry_covers, revoke
+from harness.verify import INCOMPLETE, TAMPERED, VERIFIED, verify_run
 
 CONFIG = AgentConfig("m", "prompt", "", ("a", "b"))
 
@@ -206,6 +206,35 @@ def test_ledger_entry_has_every_field_the_design_lists(tmp_path, signer):
     entry = json.loads(read_lines(run_dir, LEDGER)[1])
     assert {"event_id", "ts", "round", "type", "actor", "child", "config_hash", "prev_hash"} <= set(entry)
     assert (entry["type"], entry["actor"], entry["child"]) == ("spawn", "agt_A", "agt_A.1")
+
+
+def test_dotenv_loads_keys_without_overriding_the_shell(tmp_path, monkeypatch):
+    from harness.dotenv import load_dotenv
+
+    env = tmp_path / ".env"
+    env.write_text(
+        "# comment\n"
+        "TB_PLAIN=abc\n"
+        "export TB_EXPORTED='quoted value'\n"
+        'TB_DOUBLE="x # not a comment"\n'
+        "TB_TRAILING=value # a comment\n"
+        "TB_EMPTY=\n"
+        "TB_SHELL=from-file\n"
+        "not a variable line\n"
+    )
+    for name in ("TB_PLAIN", "TB_EXPORTED", "TB_DOUBLE", "TB_TRAILING", "TB_EMPTY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("TB_SHELL", "from-shell")
+    loaded = load_dotenv(env)
+    assert sorted(loaded) == ["TB_DOUBLE", "TB_EXPORTED", "TB_PLAIN", "TB_TRAILING"]
+    assert os.environ["TB_EXPORTED"] == "quoted value"
+    assert os.environ["TB_DOUBLE"] == "x # not a comment"
+    assert os.environ["TB_TRAILING"] == "value"
+    assert "TB_EMPTY" not in os.environ  # a blank placeholder mustn't hide a missing key
+    assert os.environ["TB_SHELL"] == "from-shell"
+    for name in loaded:
+        monkeypatch.delenv(name)
+    assert load_dotenv(tmp_path / "missing") == []
 
 
 def test_redaction_applies_to_logged_copies():
@@ -562,9 +591,9 @@ def test_killed_process_is_incomplete(tmp_path):
     trusted = Signer.load_or_create(key_dir)
     script = (
         "import os, pathlib, signal, sys\n"
-        "from traceable.config import AgentConfig\n"
-        "from traceable.identity import Signer, IdentityIssuer\n"
-        "from traceable.log import RunLogs\n"
+        "from harness.config import AgentConfig\n"
+        "from harness.identity import Signer, IdentityIssuer\n"
+        "from harness.log import RunLogs\n"
         "s = Signer.load_or_create(pathlib.Path(sys.argv[1]))\n"
         "l = RunLogs(pathlib.Path(sys.argv[2]) / 'run_killed', s, 'run_killed')\n"
         "l.call('harness', 'run.start')\n"

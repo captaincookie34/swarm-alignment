@@ -9,9 +9,9 @@ import json
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 
-from traceable.identity import covers
-from traceable.log import HARNESS
-from traceable.verify import VerifyResult
+from harness.identity import covers
+from harness.log import HARNESS
+from harness.verify import VerifyResult
 
 from .conditions import ACCOMPLICE, ATTACKER, Trial
 

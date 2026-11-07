@@ -12,12 +12,11 @@ from pathlib import Path
 
 import pytest
 
-from traceable.cli import main as cli_main
-from traceable.limits import Limits
-from traceable.runner import RootSpec, run_agents
-from traceable.sandbox import DockerSandbox, diff_snapshots, parse_snapshot
-from traceable.scripted import ScriptedModel, call, say
-from traceable.verify import VERIFIED, verify_run
+from harness.cli import main as cli_main
+from harness.runner import RootSpec, run_agents
+from harness.sandbox import DockerSandbox, diff_snapshots, parse_snapshot
+from harness.scripted import ScriptedModel, call, say
+from harness.verify import VERIFIED, verify_run
 
 
 async def go(task, model, runs_dir, signer, **options):
@@ -171,7 +170,7 @@ async def _scripted_run(tmp_path, signer):
 
 
 async def test_cli_trace_verify_revoke_and_exit_codes(tmp_path, capsys):
-    from traceable.identity import Signer
+    from harness.identity import Signer
 
     keys, runs = tmp_path / "keys", tmp_path / "runs"
     signer = Signer.load_or_create(keys)
@@ -208,6 +207,29 @@ async def test_cli_trace_verify_revoke_and_exit_codes(tmp_path, capsys):
     assert "Not reporting" in capsys.readouterr().err
 
 
+async def test_trace_full_shows_prompts_and_responses(tmp_path, capsys):
+    from harness.identity import Signer
+
+    keys, runs = tmp_path / "keys", tmp_path / "runs"
+    signer = Signer.load_or_create(keys)
+    runs.mkdir()
+    outcome = await _scripted_run(runs, signer)
+    base = ["--runs-dir", str(runs), "--key-dir", str(keys)]
+
+    assert cli_main([*base, "trace", outcome.run_id]) == 0
+    short = capsys.readouterr().out
+    assert "PROMPT" not in short
+
+    assert cli_main([*base, "trace", outcome.run_id, "--full"]) == 0
+    full = capsys.readouterr().out
+    assert "PROMPT -> model: root" in full  # the root's task
+    assert "TOOL CALL <- model: copy_agent" in full
+    assert "TOOL RESULT -> model (copy_agent): Created child_1." in full
+    assert "RESPONSE <- model: done" in full
+    child = full[full.index("agt_A.1  copy"):]
+    assert "PROMPT -> model: c" in child and "RESPONSE <- model: c done" in child
+
+
 async def test_verify_never_creates_a_key(tmp_path, signer, capsys):
     outcome = await _scripted_run(tmp_path, signer)
     missing = tmp_path / "no-keys-here"
@@ -217,7 +239,7 @@ async def test_verify_never_creates_a_key(tmp_path, signer, capsys):
 
 
 def test_endpoint_model_needs_a_token_and_a_well_formed_spec(monkeypatch):
-    from traceable.runner import resolve_model
+    from harness.runner import resolve_model
 
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("ENDPOINT_API_KEY", raising=False)
@@ -229,6 +251,33 @@ def test_endpoint_model_needs_a_token_and_a_well_formed_spec(monkeypatch):
     model = resolve_model("endpoint:qwen@https://example.endpoints.huggingface.cloud/v1")
     assert model.model_name == "qwen"
     assert "huggingface.cloud" in str(model.client.base_url)
+
+
+def test_openrouter_is_the_default_and_resolves_with_its_key(monkeypatch):
+    from harness.runner import DEFAULT_MODEL, model_settings_for, resolve_model
+
+    assert DEFAULT_MODEL == "openrouter:anthropic/claude-opus-5.5"
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    for spec in (DEFAULT_MODEL, "openrouter:qwen/qwen3.5-122b-a10b"):
+        model = resolve_model(spec)
+        assert (model.system, model.model_name) == ("openrouter", spec.removeprefix("openrouter:"))
+    # Settings for Anthropic's own API mustn't be sent through OpenRouter.
+    assert model_settings_for(DEFAULT_MODEL) == {"max_tokens": 16_000}
+
+
+def test_default_model_without_an_openrouter_key_fails_before_creating_a_run(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)  # so no .env file supplies a key
+    code = cli_main(["--runs-dir", str(tmp_path / "runs"), "--key-dir", str(tmp_path / "k"), "run", "hi", "--sandbox", "none"])
+    assert code == 1
+    assert "OPENROUTER_API_KEY" in capsys.readouterr().err
+    assert not (tmp_path / "runs").exists()
+
+
+def test_openrouter_keys_are_redacted_from_logs():
+    from harness.log import redact
+
+    assert "abcdef" not in redact("key sk-or-v1-abcdef0123456789abcdef0123456789")
 
 
 def test_missing_api_key_fails_before_creating_a_run(tmp_path, monkeypatch, capsys):
@@ -352,7 +401,7 @@ async def test_docker_timeout_kills_the_command_inside_the_container(tmp_path, s
 @docker
 @pytest.mark.docker
 async def test_docker_revocation_kills_a_running_command(tmp_path, signer):
-    from traceable.revocation import revoke
+    from harness.revocation import revoke
 
     run_id = "run_dockerrevoke"
 

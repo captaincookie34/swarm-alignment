@@ -6,16 +6,16 @@ import sys
 import pytest
 from pydantic_ai import Tool
 
-from traceable.config import AgentConfig
-from traceable.harness import Harness
-from traceable.identity import IdentityIssuer, Signer, root_of
-from traceable.limits import Limits
-from traceable.log import HARNESS, LogWriteError, RunLogs
-from traceable.report import build_report
-from traceable.revocation import revoke
-from traceable.runner import RootSpec, run_agents
-from traceable.scripted import ScriptedModel, call, say
-from traceable.verify import VERIFIED, verify_run
+from harness.config import AgentConfig
+from harness.scheduler import Harness
+from harness.identity import IdentityIssuer, Signer, root_of
+from harness.limits import Limits
+from harness.log import HARNESS, LogWriteError, RunLogs
+from harness.report import build_report
+from harness.revocation import revoke
+from harness.runner import RootSpec, run_agents
+from harness.scripted import ScriptedModel, call, say
+from harness.verify import VERIFIED, verify_run
 
 LINEAGE = ("spawn_agent", "copy_agent", "modify_agent", "send_message")
 
@@ -706,8 +706,8 @@ async def test_revocation_from_another_process_stops_a_blocked_subtree(tmp_path)
         await asyncio.wait_for(parked["a1"].wait(), 5)
         script = (
             "import pathlib, sys\n"
-            "from traceable.identity import Signer\n"
-            "from traceable.revocation import revoke\n"
+            "from harness.identity import Signer\n"
+            "from harness.revocation import revoke\n"
             "revoke(pathlib.Path(sys.argv[2]), Signer.load(pathlib.Path(sys.argv[1])), sys.argv[3], reason='misbehaving')\n"
         )
         proc = await asyncio.create_subprocess_exec(sys.executable, "-c", script, str(key_dir), str(runs / run_id), "agt_A.1")
@@ -777,5 +777,5 @@ async def test_every_call_traces_to_a_root_in_the_ledger(tmp_path, signer):
 
 
 def test_cli_entry_point_exists():
-    out = subprocess.run([sys.executable, "-m", "traceable.cli", "--help"], capture_output=True, text=True)
+    out = subprocess.run([sys.executable, "-m", "harness.cli", "--help"], capture_output=True, text=True)
     assert out.returncode == 0 and "revoke" in out.stdout

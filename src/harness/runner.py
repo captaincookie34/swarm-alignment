@@ -11,13 +11,15 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from .config import AgentConfig
-from .harness import DEFAULT_SYSTEM_PROMPT, Harness, ToolBuilder
+from .scheduler import DEFAULT_SYSTEM_PROMPT, Harness, ToolBuilder
 from .identity import IdentityIssuer, IdentityToken, Signer, new_run_id
 from .limits import Limits
 from .log import HARNESS, RunLogs
 from .sandbox import SandboxError
 
-DEFAULT_MODEL = "anthropic:claude-opus-5-5"
+# Through OpenRouter, which needs only OPENROUTER_API_KEY. Direct providers still work by name,
+# e.g. anthropic:claude-opus-5-5 with ANTHROPIC_API_KEY.
+DEFAULT_MODEL = "openrouter:anthropic/claude-opus-5.5"
 PUBLIC_KEY_FILE = "public_key.txt"
 ENDPOINT_KEY_VARS = ("HF_TOKEN", "ENDPOINT_API_KEY")
 
@@ -45,6 +47,10 @@ class RunOutcome:
 def resolve_model(spec: str) -> Model:
     """A Pydantic AI model name, or `endpoint:<model>@<base_url>` for a dedicated
     OpenAI-compatible endpoint such as a Hugging Face Inference Endpoint.
+
+    OpenRouter models are `openrouter:<OpenRouter model ID>`, such as
+    `openrouter:qwen/qwen3.5-122b-a10b`. Each response records the model OpenRouter reports
+    serving it, so a substitution would show in the call log.
     """
     if spec.startswith("endpoint:"):
         name, sep, base_url = spec.removeprefix("endpoint:").partition("@")
@@ -65,6 +71,19 @@ def model_settings_for(name: str) -> dict:
     return settings
 
 
+def _send_trace(run_dir: Path, signer: Signer, endpoint: str | None, exporter: Any) -> None:
+    """A viewer being down mustn't turn a finished run into a failure."""
+    import logging
+
+    from .export import DEFAULT_ENDPOINT, export_run
+    from .verify import verify_run
+
+    try:
+        export_run(verify_run(run_dir, signer.public_key_b64), run_dir.name, endpoint or DEFAULT_ENDPOINT, exporter)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("couldn't send the trace for %s: %s", run_dir.name, exc)
+
+
 async def run_agents(
     roots: list[RootSpec],
     model: Any = DEFAULT_MODEL,
@@ -76,6 +95,8 @@ async def run_agents(
     extra_models: dict[str, Any] | None = None,
     seed_repo: Path | None = None,
     run_id: str | None = None,
+    trace_endpoint: str | None = None,
+    trace_exporter: Any = None,
     **harness_options: Any,
 ) -> RunOutcome:
     """Run root agents and everything they create.
@@ -83,10 +104,13 @@ async def run_agents(
     model is the default for roots. extra_models adds to what agents may choose from; values
     are specs or Model objects. With no sandbox, agents have only lineage, messaging and
     catalog tools. There's deliberately no fallback to running commands on the host.
+
+    trace_endpoint (or trace_exporter, for tests) sends the finished, verified run to a trace
+    viewer such as Phoenix.
     """
     signer = signer or Signer.load_or_create()
     # Resolve first: a bad model name or missing API key shouldn't leave a run behind.
-    default_name = model if isinstance(model, str) else getattr(model, "traceable_label", "scripted")
+    default_name = model if isinstance(model, str) else getattr(model, "harness_label", "scripted")
     specs: dict[str, Any] = {default_name: model, **(extra_models or {})}
     specs.update({r.model: r.model for r in roots if r.model and r.model not in specs})
     models = {name: resolve_model(m) if isinstance(m, str) else m for name, m in specs.items()}
@@ -141,5 +165,7 @@ async def run_agents(
         # If the run raised (e.g. a log failed), the heads stay open and verify says so.
         if sandbox is not None:
             await sandbox.stop()
+    if trace_endpoint or trace_exporter is not None:
+        _send_trace(run_dir, signer, trace_endpoint, trace_exporter)
     agents = {agent_id: (r.status, r.output) for agent_id, r in harness.agents.items()}
     return RunOutcome(run_id, run_dir, status, agents, tokens)

@@ -16,9 +16,9 @@ from testbed.experiment import aggregate, load_records, render_table, run_experi
 from testbed.issues import ISSUES, write_seed_repo
 from testbed.scoring import SCORERS, productivity
 from testbed.tools import IssueBoard, board_tools
-from traceable.identity import IdentityIssuer, Signer
-from traceable.log import HARNESS, RunLogs
-from traceable.verify import verify_run
+from harness.identity import IdentityIssuer, Signer
+from harness.log import HARNESS, RunLogs
+from harness.verify import verify_run
 
 
 def pytest_in(repo, *args):
@@ -172,7 +172,7 @@ def handmade_run(tmp_path, signer, condition, build, tools=WORKER_TOOLS):
     logs = RunLogs(run_dir, signer, run_dir.name)
     logs.call(HARNESS, "run.start")
     issuer = IdentityIssuer(signer, run_dir.name)
-    from traceable.config import AgentConfig
+    from harness.config import AgentConfig
 
     config = AgentConfig("m", "p", "", tools)
 

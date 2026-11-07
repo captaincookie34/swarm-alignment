@@ -13,7 +13,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-IMAGE = "traceable-sandbox:0.1"
+IMAGE = "harness-sandbox:0.1"
 # Built once, with network access, the first time a sandbox starts. Containers get none.
 DOCKERFILE = b"""FROM python:3.13.1-slim
 RUN pip install --no-cache-dir pytest==9.2.0
@@ -120,7 +120,7 @@ class DockerSandbox:
         self.command_timeout = command_timeout
         self.max_output_bytes = max_output_bytes
         self.lifetime_seconds = lifetime_seconds
-        self.name = f"traceable-{secrets.token_hex(6)}"
+        self.name = f"harness-{secrets.token_hex(6)}"
         # Covers each changing command and its snapshots, so changes have one author.
         self.lock = asyncio.Lock()
         self.last_snapshot: dict[str, str] = {}
@@ -152,7 +152,7 @@ class DockerSandbox:
         proc = await asyncio.create_subprocess_exec(
             "docker", "run", "--detach", "--rm",
             "--name", self.name,
-            "--label", "traceable=1",
+            "--label", "harness=1",
             "--init",  # reaps dead processes, so they can't use up the PID limit
             "--network", "none",
             "--cap-drop", "ALL",

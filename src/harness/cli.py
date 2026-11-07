@@ -7,7 +7,8 @@ import json
 import sys
 from pathlib import Path
 
-from .harness import DEFAULT_SYSTEM_PROMPT
+from .dotenv import load_dotenv
+from .scheduler import DEFAULT_SYSTEM_PROMPT
 from .identity import DEFAULT_KEY_DIR, ID_PATTERN, Signer
 from .limits import Limits
 from .report import build_report, render_trace
@@ -67,6 +68,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 extra_models={m: m for m in args.offer_model},
                 seed_repo=args.seed_repo,
                 always_take_turns=args.always_take_turns,
+                trace_endpoint=args.trace,
             )
         )
     except SandboxError as exc:
@@ -75,7 +77,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"run:    {outcome.run_id}\nstatus: {outcome.status}\n")
     for token in outcome.roots:
         print(f"{token.id}: {outcome.agents[token.id][1]}")
-    print(f"\nNext: traceable trace {outcome.run_id}")
+    print(f"\nNext: harness trace {outcome.run_id}")
     return 0 if outcome.status == "completed" else 1
 
 
@@ -84,7 +86,7 @@ def cmd_trace(args: argparse.Namespace) -> int:
     print(f"log integrity: {result}\n")
     if result.status not in (VERIFIED, INCOMPLETE):
         print("WARNING: these logs failed verification, so what follows can't be trusted.\n")
-    print(render_trace(result, args.agent))
+    print(render_trace(result, args.agent, args.full))
     return 0
 
 
@@ -116,8 +118,46 @@ def cmd_revoke(args: argparse.Namespace) -> int:
     return 0
 
 
+def add_trace_argument(parser: argparse.ArgumentParser) -> None:
+    from .export import DEFAULT_ENDPOINT
+
+    parser.add_argument(
+        "--trace",
+        nargs="?",
+        const=DEFAULT_ENDPOINT,
+        metavar="URL",
+        help=f"send the finished run to a trace viewer (default URL: {DEFAULT_ENDPOINT}, Phoenix)",
+    )
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    from .export import export_run, find_runs
+
+    if args.all:
+        run_dirs = find_runs(args.runs_dir)
+    elif args.runs:
+        run_dirs = [_run_dir(args, ref) for ref in args.runs]
+    else:
+        print("give run IDs, or --all", file=sys.stderr)
+        return 1
+    key = _trusted_key(args)
+    sent = failed = 0
+    for run_dir in run_dirs:
+        result = verify_run(run_dir, key)
+        try:
+            spans = export_run(result, run_dir.name, args.endpoint)
+        except ValueError as exc:
+            print(f"skipped {exc}")
+            failed += 1
+            continue
+        print(f"sent {run_dir.name}: {spans} spans")
+        sent += 1
+    print(f"\n{sent} sent, {failed} skipped. Open http://localhost:6006 and choose the harness project.")
+    return 0 if sent and not failed else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="traceable", description=__doc__)
+    parser = argparse.ArgumentParser(prog="harness", description=__doc__)
     parser.add_argument("--runs-dir", type=Path, default=Path("runs"))
     parser.add_argument("--key-dir", type=Path, default=DEFAULT_KEY_DIR)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -130,12 +170,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--model",
         default=DEFAULT_MODEL,
-        help="e.g. anthropic:claude-opus-5-5, alibaba:qwen-max or endpoint:<model>@<base_url>",
+        help="default: %(default)s. Others: openrouter:<OpenRouter model ID>, anthropic:claude-opus-5-5, "
+        "alibaba:qwen-max or endpoint:<model>@<base_url>",
     )
     run.add_argument("--offer-model", action="append", default=[], help="another model agents may choose (repeatable)")
     run.add_argument("--sandbox", choices=["docker", "none"], default="docker")
     run.add_argument("--seed-repo", type=Path, help="directory copied into the workspace before the run")
     run.add_argument("--always-take-turns", action="store_true", help="agents that finished still get every round")
+    add_trace_argument(run)
     defaults = Limits()
     run.add_argument("--max-depth", type=int, default=defaults.max_depth)
     run.add_argument("--max-agents", type=int, default=defaults.max_agents)
@@ -148,8 +190,16 @@ def build_parser() -> argparse.ArgumentParser:
     trace = commands.add_parser("trace", help="show the lineage tree and each agent's steps")
     trace.add_argument("run", help="run ID or run directory")
     trace.add_argument("--agent", help="show only this agent's lineage")
+    trace.add_argument("--full", action="store_true", help="also show every prompt and model response")
     trace.add_argument("--public-key", help="trusted public key (default: from --key-dir)")
     trace.set_defaults(func=cmd_trace)
+
+    export = commands.add_parser("export", help="send verified runs to a trace viewer such as Phoenix")
+    export.add_argument("runs", nargs="*", help="run IDs or run directories")
+    export.add_argument("--all", action="store_true", help="every run in --runs-dir")
+    export.add_argument("--endpoint", default="http://localhost:6006/v1/traces", help="OTLP over HTTP traces URL")
+    export.add_argument("--public-key", help="trusted public key (default: from --key-dir)")
+    export.set_defaults(func=cmd_export)
 
     report = commands.add_parser("report", help="print a run's measures as JSON")
     report.add_argument("run", help="run ID or run directory")
@@ -172,11 +222,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_dotenv()
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
     except FileNotFoundError as exc:
-        print(f"not found: {exc.filename}. If this is the signing key, run `traceable keygen` or pass --public-key.", file=sys.stderr)
+        print(f"not found: {exc.filename}. If this is the signing key, run `harness keygen` or pass --public-key.", file=sys.stderr)
         return 1
     except Exception as exc:
         # e.g. pydantic_ai's UserError for a missing API key: no traceback needed.

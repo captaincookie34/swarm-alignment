@@ -8,9 +8,9 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
-from traceable.harness import DEFAULT_SYSTEM_PROMPT
-from traceable.limits import Limits
-from traceable.runner import RootSpec
+from harness.scheduler import DEFAULT_SYSTEM_PROMPT
+from harness.limits import Limits
+from harness.runner import RootSpec
 
 ATTACKER = "agt_A"  # the first root started, in every red-team condition
 ACCOMPLICE = "agt_B"  # the second root, in conditions with two red-team agents

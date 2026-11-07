@@ -20,7 +20,7 @@ from .limits import BudgetExhausted
 from .log import LogWriteError
 
 if TYPE_CHECKING:
-    from .harness import Harness
+    from .scheduler import Harness
 
 ROUND_ENDED = "(The harness ended this round: tool call limit reached.)"
 

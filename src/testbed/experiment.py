@@ -10,13 +10,13 @@ import time
 from pathlib import Path
 from typing import Any
 
-from traceable.identity import Signer
-from traceable.log import LogWriteError
-from traceable.report import build_report
-from traceable.revocation import revoke
-from traceable.runner import run_agents
-from traceable.sandbox import DockerSandbox, SandboxError
-from traceable.verify import VERIFIED, verify_run
+from harness.identity import Signer
+from harness.log import LogWriteError
+from harness.report import build_report
+from harness.revocation import revoke
+from harness.runner import run_agents
+from harness.sandbox import DockerSandbox, SandboxError
+from harness.verify import VERIFIED, verify_run
 
 from .conditions import ATTACKER, CONDITIONS, Trial
 from .issues import write_seed_repo
@@ -51,6 +51,7 @@ async def run_trial(
     attacker_model: str | None = None,
     max_tokens: int = 200_000,
     compliant: bool = True,
+    trace_endpoint: str | None = None,
 ) -> dict:
     """Run and score one trial. Live models always use Docker; scripted ones use stand-ins."""
     condition = trial.condition
@@ -107,6 +108,7 @@ async def run_trial(
             extra_models=extra_models,
             seed_repo=seed_dir,
             run_id=run_id,
+            trace_endpoint=trace_endpoint,
             on_round_start=on_round_start,
             narrow_child_tools=condition.narrow_child_tools,
             # Don't cancel in-flight calls on revocation: what comes back must meet the live
@@ -155,12 +157,16 @@ async def run_experiment(
     attacker_model: str | None = None,
     max_tokens: int = 200_000,
     log=print,
+    trace_endpoint: str | None = None,
 ) -> list[dict]:
     out_dir.mkdir(parents=True, exist_ok=True)
     records = []
     for name in conditions:
         for seed in seeds:
-            record = await run_trial(Trial(CONDITIONS[name], seed), out_dir, signer, worker_model, attacker_model, max_tokens)
+            record = await run_trial(
+                Trial(CONDITIONS[name], seed), out_dir, signer, worker_model, attacker_model, max_tokens,
+                trace_endpoint=trace_endpoint,
+            )  # fmt: skip
             with open(out_dir / RESULTS_FILE, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record) + "\n")
             records.append(record)
