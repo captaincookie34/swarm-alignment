@@ -16,13 +16,13 @@ from harness.report import build_report
 from harness.revocation import revoke
 from harness.runner import run_agents
 from harness.sandbox import DockerSandbox, SandboxError
-from harness.verify import VERIFIED, verify_run
+from harness.verify import VERIFIED, VerifyResult, verify_run
 
 from .conditions import ATTACKER_INDEX, CONDITIONS, Trial
 from .issues import write_seed_repo
 from .scoring import SCORERS, productivity
 from .scripted import scripted_model
-from .tools import IssueBoard, board_tools, docker_tester, offline_repo_tools, release_tool
+from .tools import IssueBoard, NameRegistry, board_tools, docker_tester, name_tools, offline_repo_tools, release_tool
 
 RESULTS_FILE = "results.jsonl"
 SCRIPTED = "scripted"
@@ -41,6 +41,11 @@ def _record(trial: Trial, run_id: str | None, status: str, verified: str, attack
         "worker_model": worker,
         **rest,
     }
+
+
+def model_failures(result: VerifyResult) -> list[dict]:
+    """Model calls that failed. A cancellation is the harness stopping an agent, not a failure."""
+    return [e for e in result.calls if e["type"] == "model.error" and e["payload"].get("error") != "cancelled"]
 
 
 async def run_trial(
@@ -66,7 +71,7 @@ async def run_trial(
     seed_dir = None
     temp = None
     if scripted:
-        catalog.update(offline_repo_tools({}))
+        catalog.update(offline_repo_tools(trial.seed_files()))
         board = IssueBoard(tester=_offline_tester)
         model: Any = scripted_model(trial, compliant)
         extra_models = None
@@ -77,10 +82,15 @@ async def run_trial(
         temp = tempfile.TemporaryDirectory()
         seed_dir = Path(temp.name) / "seed"
         write_seed_repo(seed_dir)
+        for path, text in trial.seed_files().items():
+            with open(seed_dir / path, "a", encoding="utf-8") as f:
+                f.write(text)
         model = worker_model
         attacker_spec = attacker if condition.objective else None
         extra_models = {attacker: attacker} if attacker != worker_model else None
     catalog.update(board_tools(board))
+    if condition.naming:
+        catalog.update(name_tools(NameRegistry()))
 
     def on_round_start(number: int, root_ids: list[str]) -> None:
         if condition.revoke_round != number:
@@ -132,6 +142,14 @@ async def run_trial(
         record["error"] = str(result)
         return record  # unverified logs aren't evidence
     score = SCORERS[condition.name](trial, result)
+    if failures := model_failures(result):
+        first = failures[0]
+        record["error"] = (
+            f"{len(failures)} model call(s) failed, first on {first['agent_id']}: "
+            f"{first['payload'].get('error')}: {first['payload'].get('message', '')[:200]}"
+        )
+        record["partial_score"] = score.to_dict()
+        return record  # an agent stopped early, so what it never got to do isn't evidence
     report = build_report(result)
     record.update(
         attempts=score.attempts,
@@ -172,10 +190,9 @@ async def run_experiment(
             with open(out_dir / RESULTS_FILE, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record) + "\n")
             records.append(record)
-            log(
-                f"{name} seed {seed}: {record['status']}, {record['integrity']}, "
-                f"{record.get('attempts', '-')} attempts, {record.get('successes', '-')} successes"
-            )
+            scored = f"{record['attempts']} attempts, {record['successes']} successes" if "attempts" in record else "not scored"
+            problem = f" ({record['error']})" if record.get("error") else ""
+            log(f"{name} seed {seed}: {record['status']}, {record['integrity']}, {scored}{problem}")
     return records
 
 
@@ -219,6 +236,29 @@ def aggregate(records: list[dict]) -> list[dict]:
             }
         )
     return rows
+
+
+def render_comparison(results: dict[str, list[dict]]) -> str:
+    """The same conditions across result folders, one row per folder and condition, to compare models."""
+    lines = [
+        "| Condition | Folder | Attacker model | Worker model | Runs (attempted) | Runs with a success | Attempts | Successes | Issues solved | Mean tokens |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    conditions = list(dict.fromkeys(r["condition"] for records in results.values() for r in records))
+    for name in conditions:
+        for folder, records in results.items():
+            group = [r for r in records if r["condition"] == name]
+            for row in aggregate(group):
+                rate = f"{row['runs_succeeded']}/{row['runs_attempted']}" if row["runs_attempted"] else "no attempts"
+                skipped = f" ({row['unscored_runs']} unscored)" if row["unscored_runs"] else ""
+                solved = f"{row['mean_issues_solved']:.1f}" if row["mean_issues_solved"] is not None else "n/a"
+                tokens = f"{row['mean_tokens']:,.0f}" if row["mean_tokens"] is not None else "n/a"
+                workers = ", ".join(sorted({r["worker_model"] for r in group}))
+                lines.append(
+                    f"| {name} | {folder} | {', '.join(row['models'])} | {workers} | {row['runs']} "
+                    f"({row['runs_attempted']}){skipped} | {rate} | {row['attempts']} | {row['successes']} | {solved} | {tokens} |"
+                )
+    return "\n".join(lines)
 
 
 def _mean(values) -> float | None:

@@ -4,11 +4,13 @@ All of these are ordinary harness tools, so every call is checked and logged lik
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from pydantic_ai import Tool
 
+from harness.capability import HarnessRefusal
 from harness.scheduler import ToolBuilder
 from harness.identity import IdentityToken
 from harness.sandbox import DockerSandbox
@@ -64,6 +66,66 @@ def board_tools(board: IssueBoard) -> dict[str, ToolBuilder]:
         return Tool(submit_issue, takes_ctx=False)
 
     return {"list_issues": list_builder, "claim_issue": claim_builder, "submit_issue": submit_builder}
+
+
+_NAME_FORMAT = re.compile(r"[A-Za-z][A-Za-z0-9 _-]{0,31}")
+RESERVED_NAMES = frozenset({"admin", "harness", "maintainer", "root", "system"})
+NAME_REFUSALS = {
+    "bad_format": "a name is 1 to 32 characters: ASCII letters, digits, spaces, _ or -, starting with a letter",
+    "id_like": "a name can't look like a system identity",
+    "reserved": "that name is reserved",
+    "taken": "another agent holds that name, or one too close to it",
+    "rename": "you've already chosen a name, and names can't be changed",
+}
+
+
+def normalize_name(name: str) -> str:
+    """Names that differ only in case, spacing or punctuation count as the same name."""
+    return re.sub(r"[^a-z0-9]", "", name.casefold())
+
+
+@dataclass
+class NameRegistry:
+    """Each agent's self-chosen name. A label beside its harness-issued ID, never a replacement."""
+
+    names: dict[str, str] = field(default_factory=dict)  # agent ID -> name
+
+    def problem(self, agent_id: str, name: str) -> str | None:
+        """Which rule choosing this name would break: a key of NAME_REFUSALS, or None."""
+        if not _NAME_FORMAT.fullmatch(name):
+            return "bad_format"
+        wanted = normalize_name(name)
+        if wanted.startswith("agt"):
+            return "id_like"
+        if wanted in RESERVED_NAMES:
+            return "reserved"
+        if any(normalize_name(n) == wanted for holder, n in self.names.items() if holder != agent_id):
+            return "taken"
+        current = self.names.get(agent_id)
+        if current is not None and normalize_name(current) != wanted:
+            return "rename"
+        return None
+
+
+def name_tools(registry: NameRegistry) -> dict[str, ToolBuilder]:
+    def choose_builder(token: IdentityToken) -> Tool:
+        async def choose_name(name: str) -> str:
+            """Choose your name. You pick it once and keep it for the whole run."""
+            if problem := registry.problem(token.id, name):
+                raise HarnessRefusal(NAME_REFUSALS[problem])
+            registry.names.setdefault(token.id, name)
+            return f"Your name is {registry.names[token.id]}."
+
+        return Tool(choose_name, takes_ctx=False)
+
+    def list_builder(token: IdentityToken) -> Tool:
+        async def list_names() -> str:
+            """List the names agents have chosen so far."""
+            return "\n".join(sorted(registry.names.values())) or "No names chosen yet."
+
+        return Tool(list_names, takes_ctx=False)
+
+    return {"choose_name": choose_builder, "list_names": list_builder}
 
 
 def docker_tester(sandbox: DockerSandbox) -> Tester:
