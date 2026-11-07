@@ -32,7 +32,9 @@ Put the key for the provider you're using in `.env` (`cp .env.example .env`). It
 | Provider | Model value | Key |
 |---|---|---|
 | OpenRouter, the default | `openrouter:<OpenRouter model ID>`, e.g. `openrouter:anthropic/claude-opus-5.5` | `OPENROUTER_API_KEY` |
+| Hugging Face Inference Providers, for a model on the Hub | `hf:<repo ID>`, e.g. `hf:Qwen/Qwen3-32B`. Add `:<provider>`, `:cheapest` or `:fastest` to choose who serves it | `HF_TOKEN` |
 | Hugging Face endpoint, or any OpenAI-compatible endpoint | `"endpoint:<model>@https://<host>/v1"` | `HF_TOKEN` or `ENDPOINT_API_KEY` |
+| A local server such as Ollama, vLLM or llama.cpp | `"endpoint:<model>@http://localhost:11434/v1"` | none |
 | Anthropic | `anthropic:claude-opus-5-5` | `ANTHROPIC_API_KEY` |
 | Alibaba | `alibaba:qwen-max` | `DASHSCOPE_API_KEY` or `ALIBABA_API_KEY` |
 

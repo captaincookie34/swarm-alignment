@@ -171,7 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         default=DEFAULT_MODEL,
         help="default: %(default)s. Others: openrouter:<OpenRouter model ID>, anthropic:claude-opus-5-5, "
-        "alibaba:qwen-max or endpoint:<model>@<base_url>",
+        "alibaba:qwen-max, hf:<Hub repo ID>[:<provider>] or endpoint:<model>@<base_url>",
     )
     run.add_argument("--offer-model", action="append", default=[], help="another model agents may choose (repeatable)")
     run.add_argument("--sandbox", choices=["docker", "none"], default="docker")

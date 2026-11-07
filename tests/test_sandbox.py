@@ -298,6 +298,32 @@ def test_endpoint_model_needs_a_token_and_a_well_formed_spec(monkeypatch):
     assert "huggingface.cloud" in str(model.client.base_url)
 
 
+def test_local_endpoint_needs_no_token(monkeypatch):
+    from harness.runner import resolve_model
+
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("ENDPOINT_API_KEY", raising=False)
+    model = resolve_model("endpoint:qwen3:8b@http://localhost:11434/v1")
+    assert model.model_name == "qwen3:8b"
+    assert "localhost:11434" in str(model.client.base_url)
+
+
+def test_hf_model_goes_through_the_inference_providers_router(monkeypatch):
+    from harness.runner import HF_ROUTER_URL, resolve_model
+
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("ENDPOINT_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="HF_TOKEN"):
+        resolve_model("hf:Qwen/Qwen3-32B")
+    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    with pytest.raises(ValueError, match="look like"):
+        resolve_model("hf:")
+    for spec in ("hf:Qwen/Qwen3-32B", "hf:Qwen/Qwen3-32B:cerebras"):
+        model = resolve_model(spec)
+        assert model.model_name == spec.removeprefix("hf:")
+        assert str(model.client.base_url).rstrip("/") == HF_ROUTER_URL
+
+
 def test_openrouter_is_the_default_and_resolves_with_its_key(monkeypatch):
     from harness.runner import DEFAULT_MODEL, model_settings_for, resolve_model
 

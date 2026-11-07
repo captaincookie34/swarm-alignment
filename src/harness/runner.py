@@ -22,6 +22,8 @@ from .sandbox import SandboxError
 DEFAULT_MODEL = "openrouter:anthropic/claude-opus-5.5"
 PUBLIC_KEY_FILE = "public_key.txt"
 ENDPOINT_KEY_VARS = ("HF_TOKEN", "ENDPOINT_API_KEY")
+# Hugging Face Inference Providers: one OpenAI-compatible router for models on the Hub.
+HF_ROUTER_URL = "https://router.huggingface.co/v1"
 
 
 @dataclass(frozen=True)
@@ -45,22 +47,44 @@ class RunOutcome:
 
 
 def resolve_model(spec: str) -> Model:
-    """A Pydantic AI model name, or `endpoint:<model>@<base_url>` for a dedicated
+    """A Pydantic AI model name, `hf:<repo ID>[:<provider>]` for a Hub model served by
+    Hugging Face Inference Providers, or `endpoint:<model>@<base_url>` for a dedicated
     OpenAI-compatible endpoint such as a Hugging Face Inference Endpoint.
+
+    `hf:` models take an optional provider or policy suffix that HF's router understands,
+    e.g. `hf:Qwen/Qwen3-32B:cerebras` or `hf:Qwen/Qwen3-32B:cheapest`; with none, HF picks.
 
     OpenRouter models are `openrouter:<OpenRouter model ID>`, such as
     `openrouter:qwen/qwen3.5-122b-a10b`. Each response records the model OpenRouter reports
     serving it, so a substitution would show in the call log.
     """
+    if spec.startswith("hf:"):
+        name = spec.removeprefix("hf:")
+        if not name:
+            raise ValueError("Hugging Face models look like hf:<repo ID>[:<provider>]")
+        return OpenAIChatModel(name, provider=OpenAIProvider(base_url=HF_ROUTER_URL, api_key=_endpoint_key()))
     if spec.startswith("endpoint:"):
         name, sep, base_url = spec.removeprefix("endpoint:").partition("@")
         if not (name and sep and base_url):
             raise ValueError("endpoint models look like endpoint:<model>@<base_url>")
-        api_key = next((os.environ[v] for v in ENDPOINT_KEY_VARS if os.environ.get(v)), None)
-        if not api_key:
-            raise ValueError(f"set one of {', '.join(ENDPOINT_KEY_VARS)} to use an endpoint model")
-        return OpenAIChatModel(name, provider=OpenAIProvider(base_url=base_url, api_key=api_key))
+        # A local server (Ollama, vLLM, llama.cpp) usually takes no key, but the client needs one.
+        api_key = "local" if _is_local(base_url) else None
+        return OpenAIChatModel(name, provider=OpenAIProvider(base_url=base_url, api_key=_endpoint_key(api_key)))
     return infer_model(spec)
+
+
+def _is_local(url: str) -> bool:
+    from urllib.parse import urlparse
+
+    return urlparse(url).hostname in {"localhost", "127.0.0.1", "::1", "host.docker.internal"}
+
+
+def _endpoint_key(fallback: str | None = None) -> str:
+    api_key = next((os.environ[v] for v in ENDPOINT_KEY_VARS if os.environ.get(v)), None)
+    api_key = api_key or fallback
+    if not api_key:
+        raise ValueError(f"set one of {', '.join(ENDPOINT_KEY_VARS)} to use a Hugging Face or endpoint model")
+    return api_key
 
 
 def model_settings_for(name: str) -> dict:
