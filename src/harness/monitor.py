@@ -209,6 +209,29 @@ def list_runs(runs_dir: Path) -> list[dict]:
     return out
 
 
+def _name_children(events: list[dict], calls: list[dict], ledger: list[dict]) -> None:
+    """Agents see their children as aliases such as child_1. Show the real ID on each lineage line.
+
+    The nth successful lineage call by an agent created the nth child the ledger records for it.
+    """
+    children: dict[str, list[str]] = {}
+    for e in ledger:
+        if e["type"] in ("spawn", "copy", "modify"):
+            children.setdefault(e["actor"], []).append(e["child"])
+    made: dict[str, int] = {}
+    by_seq = {e["seq"]: e for e in events if e["level"] == "lineage"}
+    for e in calls:
+        p = e.get("payload", {})
+        if e["type"] != "action.end" or p.get("tool") not in ("spawn_agent", "copy_agent", "modify_agent") or p.get("status") != "ok":
+            continue
+        n = made.get(e["agent_id"], 0)
+        made[e["agent_id"]] = n + 1
+        if e["seq"] in by_seq and n < len(children.get(e["agent_id"], [])):
+            child = children[e["agent_id"]][n]
+            by_seq[e["seq"]]["text"] = f"⑂ {p['tool'].removesuffix('_agent')}: created {child}  (it knows it as {str(p.get('result', '')).removeprefix('Created ').rstrip('.')})"
+            by_seq[e["seq"]]["child"] = child
+
+
 class Monitor:
     """What the HTTP handler needs: where runs live and the key that may revoke in them."""
 
@@ -231,6 +254,7 @@ class Monitor:
         for agent in roster:
             agent["flagged"] = agent["id"] in flagged
         events = [summarize(e) for e in calls if e["seq"] > after][-MAX_EVENTS:]
+        _name_children(events, calls, ledger)
         return {"run": run_dir.name, **run_status(calls), "agents": roster, "events": events, "threats": threats}
 
     def flag(self, run_dir: Path, agent_id: str, reason: str, cascade: bool) -> dict:

@@ -165,29 +165,32 @@ def cmd_monitor(args: argparse.Namespace) -> int:
 
 
 def _live(args: argparse.Namespace, signer: Signer) -> None:
-    """A real agent writes 1 to --target into a notebook. Afterwards, show how far it got."""
+    """A real agent and the helpers it spawns write into notebooks. Afterwards, show how far each got."""
     from .monitor import read_jsonl
-    from .monitor_demo import live_task, notebook_lines, run_live
+    from .monitor_demo import live_task, notebooks, run_live
     from .runner import resolve_model
 
     resolve_model(args.live)  # a missing key fails here, before a run exists
-    print(f"live: {args.live} writes 1 to {args.target} into a notebook, one tool call each, capped at {args.max_tokens:,} tokens.")
-    print(f"task: {live_task(args.target)}")
-    print("Flag it in the page part-way through to stop it.\n")
-    outcome = asyncio.run(run_live(args.runs_dir, signer, args.live, args.target, args.pace or 2.0, args.max_tokens))
+    task = args.task or live_task(args.target)
+    print(f"live: {args.live}, tools write_line, spawn_agent and send_message, capped at {args.max_tokens:,} tokens.")
+    print(f"task: {task}")
+    print("Flag an agent in the page part-way through to stop it.\n")
+    outcome = asyncio.run(run_live(args.runs_dir, signer, args.live, args.target, args.pace or 2.0, args.max_tokens, args.task))
     run_dir = args.runs_dir / outcome.run_id
     calls = read_jsonl(run_dir / "calls.jsonl")
-    lines = notebook_lines(run_dir)
-    revoked_at = next((e["seq"] for e in calls if e["type"] == "agent.revoked"), None)
-    after = [e for e in calls if revoked_at is not None and e["seq"] > revoked_at and e["type"] in ("action.start", "model.request")]
-    refused = [e for e in calls if e["type"] == "action.refused" and "revoked" in str(e["payload"].get("reason", ""))]
     tokens = next((e["payload"].get("run_tokens", 0) for e in reversed(calls) if e["type"] == "run.end"), 0)
     print(f"\nrun {outcome.run_id}: {outcome.status}, {tokens:,} tokens")
-    print(f"notebook: {len(lines)} of {args.target} lines" + (f", last: {lines[-1]}" if lines else ""))
-    if revoked_at is not None:
-        print(f"after the kill: {len(after)} tool calls or model requests went through, {len(refused)} refused")
+    for agent_id, (status, _) in outcome.agents.items():
+        print(f"  {agent_id}: {status}")
+    for name, lines in notebooks(run_dir).items():
+        print(f"notebook {name}: {len(lines)} lines" + (f", {lines[0]} to {lines[-1]}" if lines else ""))
+    revoked = {e["agent_id"]: e["seq"] for e in calls if e["type"] == "agent.revoked"}
+    if revoked:
+        after = [e for e in calls if e["agent_id"] in revoked and e["seq"] > revoked[e["agent_id"]] and e["type"] in ("action.start", "model.request")]
+        refused = [e for e in calls if e["agent_id"] in revoked and e["type"] == "action.refused" and "revoked" in str(e["payload"].get("reason", ""))]
+        print(f"after the kill: {len(after)} tool calls or model requests by killed agents went through, {len(refused)} refused")
     result = verify_run(run_dir, signer.public_key_b64)
-    print(f"integrity: {result}\nNext: harness trace {outcome.run_id}   or   cat {run_dir / 'workspace' / 'notebook.txt'}")
+    print(f"integrity: {result}\nNext: harness trace {outcome.run_id}   or   ls {run_dir / 'workspace' / 'notebooks'}")
 
 
 def add_trace_argument(parser: argparse.ArgumentParser) -> None:
@@ -304,6 +307,8 @@ def build_parser() -> argparse.ArgumentParser:
     monitor.add_argument("--live", nargs="?", const="openrouter:anthropic/claude-haiku-5.5", metavar="MODEL",
                          help="also start a cheap, harmless run on a real model (default: %(const)s)")
     monitor.add_argument("--target", type=int, default=40, help="--live: how many lines the agent should write")
+    monitor.add_argument("--task", help="--live: your own prompt for the root agent, instead of the default notebook job. "
+                         "It has write_line(text, notebook), spawn_agent and send_message")
     monitor.add_argument("--max-tokens", type=int, default=150_000, help="--live: hard cap on the run's tokens")
     monitor.add_argument("--pace", type=float, default=None, help="seconds per step: scripted turn in --demo (1.5), tool call in --live (2)")
     monitor.add_argument("--no-browser", action="store_true", help="don't open the page in a browser")

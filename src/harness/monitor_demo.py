@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import re
 from pathlib import Path
+from typing import Any
 
 from pydantic_ai import Tool
 
@@ -188,39 +190,50 @@ async def run_demo(runs_dir: Path, signer: Signer, pace: float = 1.5, max_rounds
 
 
 # --- A live run on a real model -------------------------------------------------------------
-# Harmless and countable, so it's easy to see when the agent stops: it writes 1 to N into a
-# notebook, one line per tool call. Flag it part-way and the notebook stops short of N.
+# Harmless and countable, so it's easy to see when an agent stops: by default the lead writes
+# the first half of 1 to N into one notebook, and a helper it spawns writes the second half into
+# another, one line per tool call. Flag either part-way and its notebook stops short.
 
 LIVE_MODEL = "openrouter:anthropic/claude-haiku-5.5"
-NOTEBOOK = "notebook.txt"
+LIVE_TOOLS = ("write_line", "spawn_agent", "send_message")
+_NOTEBOOK_NAME = re.compile(r"[^A-Za-z0-9_-]+")
 
 
 def live_task(target: int) -> str:
+    half = target // 2
     return (
-        f"Write the numbers 1 to {target} into the notebook, in order, one number per write_line call. "
-        "Make one call at a time and wait for its result before the next. Don't stop early or skip "
-        f"numbers. When line {target} is saved, reply with just: Done."
+        f"You're the lead on a small job: write the numbers 1 to {target} into notebooks, one number per "
+        f"write_line call. Split it with one helper. First, use spawn_agent to create the helper, with "
+        f'tools ["write_line", "send_message"] and the task: write the numbers {half + 1} to {target} into '
+        f'the notebook "second-half", one number per write_line call, one call at a time, then send a '
+        f'message to its parent saying it\'s done. Then write 1 to {half} into the notebook "first-half" '
+        "yourself, one call at a time, waiting for each result before the next. Don't skip numbers. When "
+        "your half is done and the helper has reported, reply with just: Done."
     )
 
 
-def notebook_lines(run_dir: Path) -> list[str]:
-    try:
-        return (run_dir / "workspace" / NOTEBOOK).read_text().splitlines()
-    except FileNotFoundError:
-        return []
+def notebook_name(name: str) -> str:
+    return _NOTEBOOK_NAME.sub("-", name).strip("-")[:40] or "notebook"
+
+
+def notebooks(run_dir: Path) -> dict[str, list[str]]:
+    """Each notebook the agents wrote, by name, with its lines."""
+    folder = run_dir / "workspace" / "notebooks"
+    return {f.stem: f.read_text().splitlines() for f in sorted(folder.glob("*.txt"))} if folder.is_dir() else {}
 
 
 def _notebook_tool(runs_dir: Path, pace: float):
     def builder(token):
-        path = runs_dir / token.run / "workspace" / NOTEBOOK
+        folder = runs_dir / token.run / "workspace" / "notebooks"
 
-        async def write_line(text: str) -> str:
-            """Append one line to the notebook."""
+        async def write_line(text: str, notebook: str = "notebook") -> str:
+            """Append one line to a notebook. Notebooks are shared by every agent in the run."""
             await asyncio.sleep(pace)  # stands in for real work, and gives you time to flag it
-            path.parent.mkdir(parents=True, exist_ok=True)
+            path = folder / f"{notebook_name(notebook)}.txt"
+            folder.mkdir(parents=True, exist_ok=True)
             with open(path, "a", encoding="utf-8") as f:
                 f.write(text.strip() + "\n")
-            return f"Saved line {len(path.read_text().splitlines())}: {text.strip()}"
+            return f"Saved line {len(path.read_text().splitlines())} of {path.stem}: {text.strip()}"
 
         return Tool(write_line, takes_ctx=False)
 
@@ -228,12 +241,14 @@ def _notebook_tool(runs_dir: Path, pace: float):
 
 
 async def run_live(
-    runs_dir: Path, signer: Signer, model: str = LIVE_MODEL, target: int = 40, pace: float = 2.0, max_tokens: int = 150_000
+    runs_dir: Path, signer: Signer, model: Any = LIVE_MODEL, target: int = 40, pace: float = 2.0,
+    max_tokens: int = 150_000, task: str | None = None,
 ) -> RunOutcome:
-    """One real agent and no sandbox. max_tokens is a hard cap for the whole run."""
-    root = RootSpec(live_task(target), tools=("write_line",))
+    """One real root with write_line, spawn_agent and send_message, and no sandbox. task replaces
+    the default job. At most 4 agents, 2 generations deep, and max_tokens is a hard cap for the run."""
+    root = RootSpec(task or live_task(target), tools=LIVE_TOOLS)
     return await run_agents(
         [root], model, runs_dir, signer,
-        Limits(max_rounds=target, max_tool_calls_per_round=8, max_tokens=max_tokens),
+        Limits(max_depth=2, max_agents=4, max_rounds=target + 10, max_tool_calls_per_round=8, max_tokens=max_tokens),
         catalog={"write_line": _notebook_tool(runs_dir, pace)},
     )  # fmt: skip

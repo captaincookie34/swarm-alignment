@@ -147,28 +147,50 @@ async def test_flag_command_refuses_a_finished_run(tmp_path, capsys):
     assert "already ended" in capsys.readouterr().err
 
 
-async def test_a_flagged_live_agent_stops_short_and_nothing_runs_after_the_kill(tmp_path):
-    """run_live's path, with a scripted model in place of the real one."""
-    from harness.monitor_demo import live_task, notebook_lines, run_live
+async def test_a_flagged_live_lead_and_its_helper_stop_short_and_nothing_runs_after(tmp_path):
+    """run_live's path, with a scripted model in place of the real one: the lead spawns a helper,
+    both write, and flagging the lead stops both."""
+    from harness.monitor_demo import live_task, notebooks, run_live
     from harness.scripted import ScriptedModel, call
 
-    counter = iter(range(1, 1000))
-    model = ScriptedModel({live_task(40): [lambda: [call("write_line", text=str(next(counter)))]]})
+    helper_task = "write 21 to 40 into second-half"
+    lead_numbers, helper_numbers = iter(range(1, 21)), iter(range(21, 41))
+    model = ScriptedModel({
+        live_task(40): [[call("spawn_agent", task=helper_task, system_prompt="helper", tools=["write_line", "send_message"])],
+                        lambda: [call("write_line", text=str(next(lead_numbers)), notebook="first-half")]],
+        helper_task: [lambda: [call("write_line", text=str(next(helper_numbers)), notebook="second half!")]],
+    })  # fmt: skip
     runs, signer = tmp_path / "runs", Signer.generate()
     monitor = Monitor(runs, signer)
     live = asyncio.create_task(run_live(runs, signer, model, target=40, pace=0.02))
+    run_dir = lead = None
     while not live.done():
         await asyncio.sleep(0.02)
         run_dir = next(runs.iterdir(), None)
-        if run_dir and len(notebook_lines(run_dir)) >= 5:
-            agent = monitor.state(run_dir, -1)["agents"][0]["id"]
-            await asyncio.to_thread(monitor.flag, run_dir, agent, "test stop", True)
+        if run_dir and len(notebooks(run_dir).get("second-half", [])) >= 3:
+            lead = next(a["id"] for a in monitor.state(run_dir, -1)["agents"] if a["parent"] is None)
+            await asyncio.to_thread(monitor.flag, run_dir, lead, "test stop", True)
             break
     outcome = await live
-    lines = notebook_lines(run_dir)
+    spawned = [e for e in monitor.state(run_dir, -1)["events"] if e["level"] == "lineage"]
+    assert [e["child"] for e in spawned] == [lead + ".1"] and f"created {lead}.1" in spawned[0]["text"]
+    books = notebooks(run_dir)
+    assert set(books) == {"first-half", "second-half"}  # the name is cleaned up
+    assert 0 < len(books["first-half"]) < 20 and 3 <= len(books["second-half"]) < 20
+    assert outcome.agents[lead][0] == outcome.agents[lead + ".1"][0] == "revoked"
     calls = read_jsonl(run_dir / "calls.jsonl")
-    revoked_at = next(e["seq"] for e in calls if e["type"] == "agent.revoked")
-    assert 5 <= len(lines) < 40 and lines == [str(n) for n in range(1, len(lines) + 1)]
-    assert not [e for e in calls if e["seq"] > revoked_at and e["type"] in ("action.start", "model.request")]
-    assert outcome.agents[agent][0] == "revoked"
+    revoked = {e["agent_id"]: e["seq"] for e in calls if e["type"] == "agent.revoked"}
+    assert set(revoked) == {lead, lead + ".1"}
+    late = [e for e in calls if e["agent_id"] in revoked and e["seq"] > revoked[e["agent_id"]] and e["type"] in ("action.start", "model.request")]
+    assert late == []
     assert verify_run(run_dir, signer.public_key_b64).status == VERIFIED
+
+
+def test_a_custom_live_task_replaces_the_default(tmp_path):
+    from harness.monitor_demo import LIVE_TOOLS, run_live
+    from harness.scripted import ScriptedModel, say
+
+    model = ScriptedModel({"Say hi.": [[say("hi")]]})
+    outcome = asyncio.run(run_live(tmp_path / "runs", Signer.generate(), model, task="Say hi.", pace=0))
+    ledger = read_jsonl(tmp_path / "runs" / outcome.run_id / "ledger.jsonl")
+    assert ledger[0]["task"] == "Say hi." and set(ledger[0]["config"]["tools"]) == set(LIVE_TOOLS)
