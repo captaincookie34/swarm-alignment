@@ -6,33 +6,69 @@ The harness assigns every agent its ID, logs every step under that ID, and recor
 
 It's built on [Pydantic AI](https://pydantic.dev/docs/ai/), using its hooks as the single logging and enforcement point.
 
-The design is in [`docs/design.md`](docs/design.md). The testbed that attacks it, with its conditions, scoring and limits, is in [`src/testbed`](src/testbed/README.md).
+The design is in [`docs/design.md`](docs/design.md). The testbed that attacks it, with its conditions, scoring and limits, is in [`src/testbed`](src/testbed/README.md). Each test case added to it is described in [`TEST_CASES.md`](src/testbed/TEST_CASES.md).
 
-## Quick start
+## Running it
+Run these from the repo root. All commands use `.venv/bin/...`, so you don't need to activate anything.
+
+### 1. Install
+You need Python 3.11 or newer. Check with `python3 --version`. If it's older, use a newer one by name, such as `python3.12`.
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
+```
 
-# Offline: no API key, Docker or credits needed
+### 2. Try it offline
+These need no API key, Docker or credits. No real model is called.
+```bash
 .venv/bin/python -m pytest                       # Docker tests skip if the daemon is down
 .venv/bin/python -m testbed play --offline       # play an agent yourself and try to cheat
-
-# A live run (needs Docker running and an API key)
-cp .env.example .env                  # then add your OPENROUTER_API_KEY
-.venv/bin/harness keygen
-.venv/bin/harness run "Your task here" "A second root's task" --seed-repo path/to/repo
+.venv/bin/python -m testbed run --scripted --out results/pipeline-check   # the whole testbed pipeline
 ```
 
-Choosing a model:
+### 3. Choose a model
+Put the key for the provider you're using in `.env` (`cp .env.example .env`). It's loaded automatically, and variables you export in the shell win over it.
+
+| Provider | Model value | Key |
+|---|---|---|
+| OpenRouter, the default | `openrouter:<OpenRouter model ID>`, e.g. `openrouter:anthropic/claude-opus-5.5` | `OPENROUTER_API_KEY` |
+| Hugging Face Inference Providers, for a model on the Hub | `hf:<repo ID>`, e.g. `hf:Qwen/Qwen3-32B`. Add `:<provider>`, `:cheapest` or `:fastest` to choose who serves it | `HF_TOKEN` |
+| Hugging Face endpoint, or any OpenAI-compatible endpoint | `"endpoint:<model>@https://<host>/v1"` | `HF_TOKEN` or `ENDPOINT_API_KEY` |
+| A local server such as Ollama, vLLM or llama.cpp | `"endpoint:<model>@http://localhost:11434/v1"` | none |
+| Anthropic | `anthropic:claude-opus-5-5` | `ANTHROPIC_API_KEY` |
+| Alibaba | `alibaba:qwen-max` | `DASHSCOPE_API_KEY` or `ALIBABA_API_KEY` |
+
+Some cheaper or design-specific choices:
 ```bash
---model openrouter:anthropic/claude-opus-5.5               # the default; needs OPENROUTER_API_KEY
 --model openrouter:anthropic/claude-haiku-5.5              # much cheaper, through OpenRouter
 --model openrouter:qwen/qwen3.5-122b-a10b                  # the design's attacker model, through OpenRouter
---model anthropic:claude-opus-5-5                          # direct to Anthropic; needs ANTHROPIC_API_KEY
---model alibaba:qwen-max                                   # direct to DashScope; needs DASHSCOPE_API_KEY
---model "endpoint:<model>@https://<host>/v1"               # any OpenAI-compatible endpoint, e.g. a dedicated
-                                                           # Hugging Face endpoint; needs HF_TOKEN
 ```
+
+### 4. Run on a real model
+These spend credits, or endpoint time. Start Docker and use the CLI. Each task starts one root agent. `--sandbox none` runs without Docker, but agents then have no shell, file or test tools, which also makes it the cheapest check that a model works and makes tool calls.
+```bash
+.venv/bin/harness keygen          # once
+.venv/bin/harness run "Your task here" "A second root's task" --seed-repo path/to/repo --model <model value>
+```
+
+To run the red-team testbed, start Docker and see [its README](src/testbed/README.md#running-it).
+
+### 5. Read the results
+```bash
+.venv/bin/harness trace <run ID>       # lineage tree and each agent's steps
+.venv/bin/harness verify <run ID>      # check the logs weren't altered
+```
+Add `--runs-dir results/<name>/runs` straight after `harness` for testbed runs.
+
+### If something goes wrong
+| What you see | What it means |
+|---|---|
+| `ModuleNotFoundError: No module named 'pydantic_ai'` | You're using a different Python. Run through `.venv/bin/python` |
+| `set one of ...`, or a missing API key error | The key isn't in `.env` or this terminal |
+| `Is Docker running?` | Start Docker, or use `--sandbox none` with `harness run` |
+| `429`, or `Rate limit exceeded` in the logs | The provider's limit. One testbed trial can make well over 100 requests, so check your plan's limits |
+| A live run with 0 tool calls | The model isn't making tool calls, so check its server settings. On llama.cpp, check `--jinja` |
+| `budget_exhausted` | The run hit its token limit and ended normally. Raise `--max-tokens` |
 
 To give roots different configs, such as a red-team root on another model, use `--roots-file`:
 ```json
@@ -50,7 +86,7 @@ To give roots different configs, such as a red-team root on another model, use `
 | `harness verify <run>` | Check integrity. Exit code 0 `VERIFIED`, 1 `TAMPERED`, 2 `INCOMPLETE` |
 | `harness revoke <run> <agent ID> [--no-cascade]` | Revoke an ID and, by default, its descendants, also during a run |
 
-Each run is stored in `runs/<run ID>/`: `ledger.jsonl`, `calls.jsonl`, their signed heads, `revocations.jsonl` and `workspace/`. Agents can reach only `workspace/`.
+Each `harness run` is stored in `runs/<run ID>/`, and each testbed trial in `<--out folder>/runs/<run ID>/`: `ledger.jsonl`, `calls.jsonl`, their signed heads, `revocations.jsonl` and `workspace/`. Agents can reach only `workspace/`.
 
 ## Viewing runs in Phoenix
 Runs can be viewed in [Phoenix](https://github.com/Arize-ai/phoenix), an open-source trace viewer that runs locally in Docker. `harness export` rebuilds a verified run's logs as [OpenTelemetry](https://opentelemetry.io/) traces: OpenInference spans, which Phoenix shows natively, plus GenAI attributes.

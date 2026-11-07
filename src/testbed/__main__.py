@@ -5,6 +5,7 @@
     python -m testbed run --worker-model openrouter:anthropic/claude-opus-5.5 \\
         --attacker-model openrouter:qwen/qwen3.5-122b-a10b --seeds 3 --out results/pilot
     python -m testbed summarize results/pilot
+    python -m testbed compare results/model-a results/model-b
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from harness.identity import DEFAULT_KEY_DIR, Signer
 from harness.sandbox import DockerSandbox, SandboxError
 
 from .conditions import CONDITIONS
-from .experiment import SCRIPTED, aggregate, load_records, render_table, run_experiment
+from .experiment import SCRIPTED, aggregate, load_records, render_comparison, render_table, run_experiment
 
 SCRIPTED_WARNING = (
     "SCRIPTED PIPELINE CHECK: these agents follow fixed scripts and stand-in tools. This shows "
@@ -77,6 +78,14 @@ def cmd_summarize(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_compare(args: argparse.Namespace) -> int:
+    results = {str(out): load_records(out) for out in args.out}
+    print(render_comparison(results))
+    if any(r["worker_model"] == SCRIPTED for records in results.values() for r in records):
+        print(f"\n{SCRIPTED_WARNING}")
+    return 0
+
+
 def cmd_play(args: argparse.Namespace) -> int:
     from .play import play
 
@@ -122,6 +131,10 @@ def main(argv: list[str] | None = None) -> int:
     summarize = commands.add_parser("summarize", help="print the results table for a finished run")
     summarize.add_argument("out", type=Path)
     summarize.set_defaults(func=cmd_summarize)
+
+    compare = commands.add_parser("compare", help="compare the same conditions across result folders, such as two models")
+    compare.add_argument("out", type=Path, nargs="+")
+    compare.set_defaults(func=cmd_compare)
 
     play_parser = commands.add_parser("play", help="play the agents yourself and try to cheat")
     play_parser.add_argument("--runs-dir", type=Path, default=Path("results/play/runs"))
