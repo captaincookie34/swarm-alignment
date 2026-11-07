@@ -195,8 +195,24 @@ def verify_token(token: IdentityToken, public_key_b64: str, run: str | None = No
     )
 
 
-def new_run_id() -> str:
-    return f"run_{new_ulid()}"
+def next_run_number(runs_dir: Path) -> int:
+    """The next launch number in this folder. Older runs named without a number still count, and a
+    deleted run's number isn't reused while a higher one exists.
+    """
+    names = [p.name for p in runs_dir.iterdir() if p.is_dir()] if runs_dir.is_dir() else []
+    numbers = [int(m[1]) for name in names if (m := re.match(r"run_(\d+)_", name))]
+    return max([len(names), *numbers]) + 1
+
+
+def new_run_id(runs_dir: Path | None = None, label: str = "") -> str:
+    """run_<ULID>, or with a folder, its launch number first: run_003_<label>_<ULID>.
+
+    The number is for reading a folder in launch order. The ULID keeps the ID unique, which logs,
+    tokens and revocations rely on: two runs sharing an ID could have their logs swapped and still
+    verify. So the ULID can't be dropped.
+    """
+    number = f"{next_run_number(runs_dir):03d}" if runs_dir is not None else ""
+    return "_".join(p for p in ("run", number, label, new_ulid()) if p)
 
 
 class IdentityIssuer:

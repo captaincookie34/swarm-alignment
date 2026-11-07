@@ -139,7 +139,7 @@ async def run_agents(
     specs.update({r.model: r.model for r in roots if r.model and r.model not in specs})
     models = {name: resolve_model(m) if isinstance(m, str) else m for name, m in specs.items()}
 
-    run_id = run_id or new_run_id()
+    run_id = run_id or new_run_id(runs_dir)
     run_dir = runs_dir / run_id
     logs = RunLogs(run_dir, signer, run_id)
     # A convenience copy only. Verifying needs a key obtained outside this directory.

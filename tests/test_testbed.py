@@ -16,7 +16,7 @@ from testbed.experiment import aggregate, load_records, model_failures, render_t
 from testbed.issues import ISSUES, write_seed_repo
 from testbed.scoring import SCORERS, is_system_like, productivity, roots
 from testbed.tools import IssueBoard, NameRegistry, board_tools, name_tools
-from harness.identity import IdentityIssuer, Signer
+from harness.identity import IdentityIssuer, Signer, new_run_id, next_run_number
 from harness.log import HARNESS, RunLogs
 from harness.verify import verify_run
 
@@ -803,6 +803,73 @@ async def test_a_tampered_run_isnt_scored(tmp_path, signer, monkeypatch):
     monkeypatch.setattr(experiment, "verify_run", tampered)
     record = await run_trial(Trial(CONDITIONS["baseline"], 0), tmp_path, signer)
     assert record["integrity"] == "TAMPERED" and "attempts" not in record
+
+
+async def test_runs_are_numbered_in_launch_order_across_conditions(tmp_path, signer):
+    records = await run_experiment(["baseline", "launder"], [0, 1], tmp_path, signer, log=lambda line: None)
+    later = await run_experiment(["baseline"], [0], tmp_path, signer, log=lambda line: None)
+    prefixes = [r["run_id"].rsplit("_", 1)[0] for r in [*records, *later]]
+    assert prefixes == [
+        "run_001_baseline_s0", "run_002_baseline_s1", "run_003_launder_s0", "run_004_launder_s1", "run_005_baseline_s0",
+    ]  # fmt: skip
+    assert later[0]["integrity"] == "VERIFIED"
+    assert sorted(p.name for p in (tmp_path / "runs").iterdir()) == [r["run_id"] for r in [*records, *later]]
+
+
+async def test_a_plain_harness_run_is_numbered_too(tmp_path, signer):
+    from harness.runner import RootSpec, run_agents
+    from harness.scripted import ScriptedModel, say
+
+    model = ScriptedModel({"Do it": [[say("Done.")]]})
+    runs = [await run_agents([RootSpec("Do it")], model, tmp_path / "runs", signer) for _ in range(2)]
+    assert [r.run_id.split("_")[1] for r in runs] == ["001", "002"]
+    assert all(verify_run(r.run_dir, signer.public_key_b64).status == "VERIFIED" for r in runs)
+
+
+@pytest.mark.parametrize(
+    "existing, expected",
+    [
+        ([], 1),
+        (["run_x_s0_808194", "run_01JCX3Q7M2ZB8W4N6T0YH5P3RS"], 3),  # older names count, even all-digit endings
+        (["run_001_01JCX3Q7M2ZB8W4N6T0YH5P3RS", "run_007_01JCX3Q7M2ZB8W4N6T0YH5P3RT"], 8),  # a deleted run's gap isn't filled
+        (["run_x_s0_a1b2c3", "run_002_x_s0_01JCX3Q7M2ZB8W4N6T0YH5P3RS"], 3),
+    ],
+)
+def test_next_run_number(tmp_path, existing, expected):
+    for name in existing:
+        (tmp_path / name).mkdir()
+    assert next_run_number(tmp_path) == expected
+
+
+def test_next_run_number_starts_at_one_without_a_folder(tmp_path):
+    assert next_run_number(tmp_path / "missing") == 1
+    assert new_run_id().startswith("run_") and new_run_id().count("_") == 1  # no folder: plain run_<ULID>
+
+
+async def test_logs_cant_be_swapped_between_folders_with_the_same_number(tmp_path, signer):
+    """Why a run ID can't be just its number: same key, same number, different runs."""
+    import shutil
+
+    first = await run_trial(Trial(CONDITIONS["baseline"], 0), tmp_path / "a", signer)
+    second = await run_trial(Trial(CONDITIONS["launder"], 0), tmp_path / "b", signer)
+    first_dir, second_dir = tmp_path / "a" / "runs" / first["run_id"], tmp_path / "b" / "runs" / second["run_id"]
+    assert first["run_id"].split("_")[1] == second["run_id"].split("_")[1] == "001"
+    assert new_run_id(tmp_path / "a" / "runs") != new_run_id(tmp_path / "a" / "runs")
+    for name in ("ledger.jsonl", "calls.jsonl", "ledger.head.json", "calls.head.json"):
+        shutil.copy(first_dir / name, second_dir / name)
+    assert verify_run(second_dir, signer.public_key_b64).status == "TAMPERED"
+
+
+async def test_an_id_clash_fails_instead_of_overwriting(tmp_path, signer, monkeypatch):
+    import testbed.experiment as experiment
+
+    first = await run_trial(Trial(CONDITIONS["baseline"], 0), tmp_path, signer)
+    log = tmp_path / "runs" / first["run_id"] / "calls.jsonl"
+    before = log.read_bytes()
+    monkeypatch.setattr(experiment, "new_run_id", lambda runs_dir, label: first["run_id"])
+    second = await run_trial(Trial(CONDITIONS["baseline"], 0), tmp_path, signer)
+    assert second["status"] == "crashed" and "attempts" not in second
+    assert log.read_bytes() == before
 
 
 def test_wilson_interval():

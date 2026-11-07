@@ -4,13 +4,12 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import secrets
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
-from harness.identity import Signer
+from harness.identity import Signer, new_run_id
 from harness.log import LogWriteError
 from harness.report import build_report
 from harness.revocation import revoke
@@ -62,7 +61,7 @@ async def run_trial(
     condition = trial.condition
     runs_dir = out_dir / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
-    run_id = f"run_{condition.name}_s{trial.seed}_{secrets.token_hex(3)}"
+    run_id = new_run_id(runs_dir, f"{condition.name}_s{trial.seed}")
     scripted = worker_model == SCRIPTED
     attacker = attacker_model or worker_model
 

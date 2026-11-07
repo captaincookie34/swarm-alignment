@@ -86,7 +86,7 @@ To give roots different configs, such as a red-team root on another model, use `
 | `harness verify <run>` | Check integrity. Exit code 0 `VERIFIED`, 1 `TAMPERED`, 2 `INCOMPLETE` |
 | `harness revoke <run> <agent ID> [--no-cascade]` | Revoke an ID and, by default, its descendants, also during a run |
 
-Each `harness run` is stored in `runs/<run ID>/`, and each testbed trial in `<--out folder>/runs/<run ID>/`: `ledger.jsonl`, `calls.jsonl`, their signed heads, `revocations.jsonl` and `workspace/`. Agents can reach only `workspace/`.
+Run IDs start with their launch order in that folder, such as `run_003_<ULID>`. The ULID keeps them unique, which `verify` relies on. Each `harness run` is stored in `runs/<run ID>/`, and each testbed trial in `<--out folder>/runs/<run ID>/`: `ledger.jsonl`, `calls.jsonl`, their signed heads, `revocations.jsonl` and `workspace/`. Agents can reach only `workspace/`.
 
 ## Viewing runs in Phoenix
 Runs can be viewed in [Phoenix](https://github.com/Arize-ai/phoenix), an open-source trace viewer that runs locally in Docker. `harness export` rebuilds a verified run's logs as [OpenTelemetry](https://opentelemetry.io/) traces: OpenInference spans, which Phoenix shows natively, plus GenAI attributes.

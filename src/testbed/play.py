@@ -149,7 +149,7 @@ async def play(
     """Run a session. Returns (run ID, integrity status)."""
     import tempfile
 
-    run_id = new_run_id()
+    run_id = new_run_id(runs_dir)
     model = HumanModel(ask or StdinReader(), show)
     catalog: dict = {**release_tool()}
     if sandbox is None:

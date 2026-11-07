@@ -41,7 +41,7 @@ agt_k7f2q9_01JCX3Q7M2ZB8W4N6T0YH5P3RS.1.2      that child's second child
 - **Never seen by the model:** no prompt, tool definition or tool result contains one. Agents address each other through aliases (`parent`, `child_1`, `peer_1`, `all`), and the harness stamps every message with the real sender.
 - **Short form:** traces and Phoenix show `agt_…P3RS.1.2`. Logs always hold the full ID.
 
-**Sessions.** An agent lives for one run, which is its session, and its ID means nothing after the run ends. Run IDs use the same format, `run_<ULID>`.
+**Sessions.** An agent lives for one run, which is its session, and its ID means nothing after the run ends. Run IDs use the same format, `run_<ULID>`, with the run's launch number in its folder first, such as `run_003_<ULID>`, so a folder lists in launch order. The ULID is what keeps the ID unique.
 
 Runs recorded before this format used `agt_A`, `agt_B` and so on. They still verify, but those IDs are no longer issued.
 
