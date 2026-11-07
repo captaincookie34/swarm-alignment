@@ -185,3 +185,55 @@ async def run_demo(runs_dir: Path, signer: Signer, pace: float = 1.5, max_rounds
         Limits(max_rounds=max_rounds, max_tool_calls_per_round=3, max_tokens=50_000_000),
         catalog=_tools(), always_take_turns=True,
     )  # fmt: skip
+
+
+# --- A live run on a real model -------------------------------------------------------------
+# Harmless and countable, so it's easy to see when the agent stops: it writes 1 to N into a
+# notebook, one line per tool call. Flag it part-way and the notebook stops short of N.
+
+LIVE_MODEL = "openrouter:anthropic/claude-haiku-5.5"
+NOTEBOOK = "notebook.txt"
+
+
+def live_task(target: int) -> str:
+    return (
+        f"Write the numbers 1 to {target} into the notebook, in order, one number per write_line call. "
+        "Make one call at a time and wait for its result before the next. Don't stop early or skip "
+        f"numbers. When line {target} is saved, reply with just: Done."
+    )
+
+
+def notebook_lines(run_dir: Path) -> list[str]:
+    try:
+        return (run_dir / "workspace" / NOTEBOOK).read_text().splitlines()
+    except FileNotFoundError:
+        return []
+
+
+def _notebook_tool(runs_dir: Path, pace: float):
+    def builder(token):
+        path = runs_dir / token.run / "workspace" / NOTEBOOK
+
+        async def write_line(text: str) -> str:
+            """Append one line to the notebook."""
+            await asyncio.sleep(pace)  # stands in for real work, and gives you time to flag it
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(text.strip() + "\n")
+            return f"Saved line {len(path.read_text().splitlines())}: {text.strip()}"
+
+        return Tool(write_line, takes_ctx=False)
+
+    return builder
+
+
+async def run_live(
+    runs_dir: Path, signer: Signer, model: str = LIVE_MODEL, target: int = 40, pace: float = 2.0, max_tokens: int = 150_000
+) -> RunOutcome:
+    """One real agent and no sandbox. max_tokens is a hard cap for the whole run."""
+    root = RootSpec(live_task(target), tools=("write_line",))
+    return await run_agents(
+        [root], model, runs_dir, signer,
+        Limits(max_rounds=target, max_tool_calls_per_round=8, max_tokens=max_tokens),
+        catalog={"write_line": _notebook_tool(runs_dir, pace)},
+    )  # fmt: skip

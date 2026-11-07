@@ -142,3 +142,30 @@ async def test_flag_command_refuses_a_finished_run(tmp_path, capsys):
     args = ["--runs-dir", str(runs), "--key-dir", str(key_dir), "flag", outcome.run_id, agent, "--reason", "test"]
     assert await asyncio.to_thread(cli_main, args) == 1
     assert "already ended" in capsys.readouterr().err
+
+
+async def test_a_flagged_live_agent_stops_short_and_nothing_runs_after_the_kill(tmp_path):
+    """run_live's path, with a scripted model in place of the real one."""
+    from harness.monitor_demo import live_task, notebook_lines, run_live
+    from harness.scripted import ScriptedModel, call
+
+    counter = iter(range(1, 1000))
+    model = ScriptedModel({live_task(40): [lambda: [call("write_line", text=str(next(counter)))]]})
+    runs, signer = tmp_path / "runs", Signer.generate()
+    monitor = Monitor(runs, signer)
+    live = asyncio.create_task(run_live(runs, signer, model, target=40, pace=0.02))
+    while not live.done():
+        await asyncio.sleep(0.02)
+        run_dir = next(runs.iterdir(), None)
+        if run_dir and len(notebook_lines(run_dir)) >= 5:
+            agent = monitor.state(run_dir, -1)["agents"][0]["id"]
+            await asyncio.to_thread(monitor.flag, run_dir, agent, "test stop", True)
+            break
+    outcome = await live
+    lines = notebook_lines(run_dir)
+    calls = read_jsonl(run_dir / "calls.jsonl")
+    revoked_at = next(e["seq"] for e in calls if e["type"] == "agent.revoked")
+    assert 5 <= len(lines) < 40 and lines == [str(n) for n in range(1, len(lines) + 1)]
+    assert not [e for e in calls if e["seq"] > revoked_at and e["type"] in ("action.start", "model.request")]
+    assert outcome.agents[agent][0] == "revoked"
+    assert verify_run(run_dir, signer.public_key_b64).status == VERIFIED

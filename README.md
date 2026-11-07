@@ -95,8 +95,11 @@ Each `harness run` is stored in `runs/<run ID>/`, and each testbed trial in `<--
 
 ```bash
 .venv/bin/harness monitor --demo     # try it offline: two workers and a rogue agent, no API key or Docker
+.venv/bin/harness monitor --live     # one real agent on a cheap model, writing 1 to 40 into a notebook
 .venv/bin/harness monitor            # or watch your own runs: start `harness run ...` in another terminal
 ```
+`--live` is the cheapest way to see a kill on a real model. The agent's task is harmless: write the numbers 1 to 40 into `workspace/notebook.txt`, one tool call each. Flag it part-way and the notebook stops short, nothing runs after the kill, and the terminal prints how far it got and whether the run verifies. It uses `openrouter:anthropic/claude-haiku-5.5` by default (`--live <model>` for another) and needs only `OPENROUTER_API_KEY`, with no Docker. `--max-tokens` is a hard cap, 150,000 by default: at $0.10 per million input tokens and $0.50 per million output, a full 40-line run costs under 1¢.
+
 - **Agents:** the lineage tree, with each agent's status, requests, tool calls, refusals, tokens and latest action. Click one to filter the feed to it.
 - **Live requests:** model replies, tool calls and results, messages, refusals and kills. Calls touching the logs, keys or the network are marked `⚠` to catch your eye. That's a word list, not detection, so read the rest too.
 - **Threat log:** each flag, with its reason and a signature check. It's `threats.jsonl` in the run directory, signed with the run's key and tied to the revocation it caused, so entries can't be added or edited without the key.
