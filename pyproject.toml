@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "traceable"
+version = "0.1.0"
+description = "Traceable agent harness: every agent step is logged under a harness-issued, signed ID."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic-ai-slim[anthropic,openai]==2.66.0",
+    "cryptography==50.0.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.2.0", "pytest-asyncio==1.4.1.post1"]
+
+[project.scripts]
+traceable = "traceable.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+markers = ["docker: needs a running Docker daemon"]

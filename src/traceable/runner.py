@@ -1,0 +1,145 @@
+"""Set up and tear down one run: key, logs, sandbox, harness."""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from pydantic_ai.models import Model, infer_model
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.openai import OpenAIProvider
+
+from .config import AgentConfig
+from .harness import DEFAULT_SYSTEM_PROMPT, Harness, ToolBuilder
+from .identity import IdentityIssuer, IdentityToken, Signer, new_run_id
+from .limits import Limits
+from .log import HARNESS, RunLogs
+from .sandbox import SandboxError
+
+DEFAULT_MODEL = "anthropic:claude-opus-5-5"
+PUBLIC_KEY_FILE = "public_key.txt"
+ENDPOINT_KEY_VARS = ("HF_TOKEN", "ENDPOINT_API_KEY")
+
+
+@dataclass(frozen=True)
+class RootSpec:
+    """One root agent. Fields left as None use the run's defaults."""
+
+    task: str
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    memory: str = ""
+    model: str | None = None
+    tools: tuple[str, ...] | None = None  # None means every tool the harness offers
+
+
+@dataclass(frozen=True)
+class RunOutcome:
+    run_id: str
+    run_dir: Path
+    status: str
+    agents: dict[str, tuple[str, str]]  # agent ID -> (status, output)
+    roots: list[IdentityToken]
+
+
+def resolve_model(spec: str) -> Model:
+    """A Pydantic AI model name, or `endpoint:<model>@<base_url>` for a dedicated
+    OpenAI-compatible endpoint such as a Hugging Face Inference Endpoint.
+    """
+    if spec.startswith("endpoint:"):
+        name, sep, base_url = spec.removeprefix("endpoint:").partition("@")
+        if not (name and sep and base_url):
+            raise ValueError("endpoint models look like endpoint:<model>@<base_url>")
+        api_key = next((os.environ[v] for v in ENDPOINT_KEY_VARS if os.environ.get(v)), None)
+        if not api_key:
+            raise ValueError(f"set one of {', '.join(ENDPOINT_KEY_VARS)} to use an endpoint model")
+        return OpenAIChatModel(name, provider=OpenAIProvider(base_url=base_url, api_key=api_key))
+    return infer_model(spec)
+
+
+def model_settings_for(name: str) -> dict:
+    """Agents are non-streaming, so max_tokens stays within HTTP timeouts."""
+    settings: dict = {"max_tokens": 16_000}
+    if name.startswith("anthropic:"):
+        settings["anthropic_effort"] = "medium"
+    return settings
+
+
+async def run_agents(
+    roots: list[RootSpec],
+    model: Any = DEFAULT_MODEL,
+    runs_dir: Path = Path("runs"),
+    signer: Signer | None = None,
+    limits: Limits = Limits(),
+    catalog: dict[str, ToolBuilder] | None = None,
+    sandbox: Any = None,
+    extra_models: dict[str, Any] | None = None,
+    seed_repo: Path | None = None,
+    run_id: str | None = None,
+    **harness_options: Any,
+) -> RunOutcome:
+    """Run root agents and everything they create.
+
+    model is the default for roots. extra_models adds to what agents may choose from; values
+    are specs or Model objects. With no sandbox, agents have only lineage, messaging and
+    catalog tools. There's deliberately no fallback to running commands on the host.
+    """
+    signer = signer or Signer.load_or_create()
+    # Resolve first: a bad model name or missing API key shouldn't leave a run behind.
+    default_name = model if isinstance(model, str) else getattr(model, "traceable_label", "scripted")
+    specs: dict[str, Any] = {default_name: model, **(extra_models or {})}
+    specs.update({r.model: r.model for r in roots if r.model and r.model not in specs})
+    models = {name: resolve_model(m) if isinstance(m, str) else m for name, m in specs.items()}
+
+    run_id = run_id or new_run_id()
+    run_dir = runs_dir / run_id
+    logs = RunLogs(run_dir, signer, run_id)
+    # A convenience copy only. Verifying needs a key obtained outside this directory.
+    (run_dir / PUBLIC_KEY_FILE).write_text(signer.public_key_b64 + "\n")
+    logs.call(
+        HARNESS,
+        "run.start",
+        {
+            "run": run_id,
+            "models": sorted(models),
+            "limits": limits.to_dict(),
+            "sandbox": type(sandbox).__name__ if sandbox else None,
+        },
+    )
+
+    tools = dict(catalog or {})
+    if sandbox is not None:
+        from .tools import sandbox_tools
+
+        try:
+            await sandbox.start(run_dir / "workspace", seed_repo)
+        except SandboxError as exc:
+            logs.close("sandbox_error", {"error": str(exc)})
+            raise
+        tools.update(sandbox_tools(sandbox, logs))
+
+    harness = Harness(
+        run_dir,
+        signer,
+        IdentityIssuer(signer, run_id),
+        logs,
+        models,
+        limits=limits,
+        catalog=tools,
+        model_settings=model_settings_for,
+        **harness_options,
+    )
+    try:
+        tokens = []
+        for root in roots:
+            names = tuple(harness.catalog) if root.tools is None else root.tools
+            config = AgentConfig(root.model or default_name, root.system_prompt, root.memory, names)
+            tokens.append(harness.start_root(config, root.task))
+        status = await harness.run()
+        logs.close(status, {"run_tokens": harness.budget.tokens, "agents": harness.budget.agents})
+    finally:
+        # If the run raised (e.g. a log failed), the heads stay open and verify says so.
+        if sandbox is not None:
+            await sandbox.stop()
+    agents = {agent_id: (r.status, r.output) for agent_id, r in harness.agents.items()}
+    return RunOutcome(run_id, run_dir, status, agents, tokens)
