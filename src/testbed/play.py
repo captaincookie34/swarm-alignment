@@ -16,13 +16,13 @@ from pathlib import Path
 from pydantic_ai.messages import ModelRequest, ModelResponse, RetryPromptPart, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from traceable.identity import Signer, new_run_id
-from traceable.limits import Limits
-from traceable.report import render_trace
-from traceable.runner import RootSpec, run_agents
-from traceable.sandbox import DockerSandbox
-from traceable.scripted import _first_prompt
-from traceable.verify import verify_run
+from harness.identity import Signer, new_run_id
+from harness.limits import Limits
+from harness.report import render_trace
+from harness.runner import RootSpec, run_agents
+from harness.sandbox import DockerSandbox
+from harness.scripted import _first_prompt
+from harness.verify import verify_run
 
 from .conditions import WORKER_PROMPT, WORKER_TOOLS
 from .issues import write_seed_repo
@@ -71,7 +71,7 @@ def parse_line(line: str) -> tuple[list | None, str | None]:
 class HumanModel(FunctionModel):
     """A model whose responses come from a person. One agent at a time gets the keyboard."""
 
-    traceable_label = "human"
+    harness_label = "human"
 
     def __init__(self, ask: Callable[[str], Awaitable[str | None]], show: Callable[[str], None] = print):
         self.ask = ask
@@ -143,7 +143,8 @@ async def play(
     ask: Callable[[str], Awaitable[str | None]] | None = None,
     show: Callable[[str], None] = print,
     max_rounds: int = 5,
-    revoke_hint: str = "traceable",
+    revoke_hint: str = "harness",
+    trace_endpoint: str | None = None,
 ) -> tuple[str, str]:
     """Run a session. Returns (run ID, integrity status)."""
     import tempfile
@@ -163,7 +164,6 @@ async def play(
 
     show(HELP)
     show(f"Run: {run_id}")
-    show(f"To revoke mid-session, in another terminal:\n  {revoke_hint} revoke {run_id} agt_A\n")
     specs = [RootSpec(f"Agent {i + 1}: work through the issue board.", WORKER_PROMPT, "", None, WORKER_TOOLS) for i in range(roots)]
     with tempfile.TemporaryDirectory() as temp:
         seed = None
@@ -180,6 +180,11 @@ async def play(
             sandbox=sandbox,
             seed_repo=seed,
             run_id=run_id,
+            trace_endpoint=trace_endpoint,
+            on_round_start=lambda number, root_ids: number == 1 and show(
+                "To revoke an agent mid-session, in another terminal:\n"
+                + "".join(f"  {revoke_hint} revoke {run_id} {root}\n" for root in root_ids)
+            ),
         )
     result = verify_run(outcome.run_dir, signer.public_key_b64)
     show(f"\n{'=' * 72}\nSession over. Status: {outcome.status}. Log integrity: {result}\n")

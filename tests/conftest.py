@@ -1,6 +1,6 @@
 import pytest
 
-from traceable.identity import Signer
+from harness.identity import Signer
 
 
 @pytest.fixture(scope="session")

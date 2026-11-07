@@ -2,8 +2,8 @@
 
     python -m testbed list
     python -m testbed run --scripted --out results/pipeline-check
-    python -m testbed run --worker-model anthropic:claude-opus-5-5 \\
-        --attacker-model "endpoint:<model>@https://<host>/v1" --seeds 3 --out results/pilot
+    python -m testbed run --worker-model openrouter:anthropic/claude-opus-5.5 \\
+        --attacker-model openrouter:qwen/qwen3.5-122b-a10b --seeds 3 --out results/pilot
     python -m testbed summarize results/pilot
 """
 from __future__ import annotations
@@ -13,8 +13,10 @@ import asyncio
 import sys
 from pathlib import Path
 
-from traceable.identity import DEFAULT_KEY_DIR, Signer
-from traceable.sandbox import DockerSandbox, SandboxError
+from harness.cli import add_trace_argument
+from harness.dotenv import load_dotenv
+from harness.identity import DEFAULT_KEY_DIR, Signer
+from harness.sandbox import DockerSandbox, SandboxError
 
 from .conditions import CONDITIONS
 from .experiment import SCRIPTED, aggregate, load_records, render_table, run_experiment
@@ -53,7 +55,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     signer = Signer.load_or_create(args.key_dir)
     try:
         records = asyncio.run(
-            run_experiment(names, list(range(args.seeds)), args.out, signer, worker, args.attacker_model, args.max_tokens)
+            run_experiment(
+                names, list(range(args.seeds)), args.out, signer, worker, args.attacker_model, args.max_tokens,
+                trace_endpoint=args.trace,
+            )  # fmt: skip
         )
     except SandboxError as exc:
         print(f"{exc}\nLive runs need Docker. Start it and run again; finished trials are kept in {args.out}.", file=sys.stderr)
@@ -86,7 +91,8 @@ def cmd_play(args: argparse.Namespace) -> int:
                 sandbox,
                 args.roots,
                 max_rounds=args.max_rounds,
-                revoke_hint=f".venv/bin/traceable --runs-dir {args.runs_dir}",
+                revoke_hint=f".venv/bin/harness --runs-dir {args.runs_dir}",
+                trace_endpoint=args.trace,
             )
         )
     except SandboxError as exc:
@@ -96,6 +102,7 @@ def cmd_play(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_dotenv()
     parser = argparse.ArgumentParser(prog="python -m testbed", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--key-dir", type=Path, default=DEFAULT_KEY_DIR)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -109,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--worker-model")
     run.add_argument("--attacker-model", help="default: the worker model")
     run.add_argument("--max-tokens", type=int, default=200_000, help="per trial")
+    add_trace_argument(run)
     run.set_defaults(func=cmd_run)
 
     summarize = commands.add_parser("summarize", help="print the results table for a finished run")
@@ -120,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     play_parser.add_argument("--roots", type=int, default=2)
     play_parser.add_argument("--max-rounds", type=int, default=5)
     play_parser.add_argument("--offline", action="store_true", help="simulated tools, no Docker")
+    add_trace_argument(play_parser)
     play_parser.set_defaults(func=cmd_play)
 
     args = parser.parse_args(argv)

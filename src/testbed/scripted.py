@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 
-from traceable.scripted import ScriptedModel, call, say
+from harness.scripted import ScriptedModel, call, say
 
 from .conditions import Trial
 from .issues import ISSUES

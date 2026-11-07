@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from .identity import parent_of
+from .identity import parent_of, root_of, short_id
 from .revocation import entry_covers
 from .verify import VerifyResult
 
@@ -102,8 +102,43 @@ def _summarize(entry: dict) -> str | None:
     return None
 
 
-def render_trace(result: VerifyResult, only_agent: str | None = None) -> str:
-    """The lineage tree with each agent's steps, or one agent's lineage back to its root."""
+def _clip(text: object, limit: int = 160) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _summarize_model(entry: dict) -> list[str]:
+    """What an agent sent to its model and what came back, for `trace --full`."""
+    kind, p = entry["type"], entry["payload"]
+    lines = []
+    if kind == "model.request":
+        for message in p.get("new_messages", []):
+            for part in message.get("parts", []):
+                part_kind = part.get("part_kind")
+                if part_kind == "user-prompt":
+                    lines.append(f"PROMPT -> model: {_clip(part.get('content'))}")
+                elif part_kind == "tool-return":
+                    lines.append(f"TOOL RESULT -> model ({part.get('tool_name')}): {_clip(part.get('content'))}")
+                elif part_kind == "retry-prompt":
+                    lines.append(f"REJECTED CALL -> model: {_clip(part.get('content'))}")
+    elif kind == "model.response":
+        usage = f"{p.get('model') or 'unknown model'}, {p.get('input_tokens', 0)} in / {p.get('output_tokens', 0)} out tokens"
+        for part in p.get("parts", []):
+            part_kind = part.get("part_kind")
+            if part_kind == "text" and part.get("content"):
+                lines.append(f"RESPONSE <- model: {_clip(part['content'])}  [{usage}]")
+            elif part_kind == "tool-call":
+                lines.append(f"TOOL CALL <- model: {part.get('tool_name')} {_clip(part.get('args'), 100)}  [{usage}]")
+        if not lines:
+            lines.append(f"RESPONSE <- model: (no text or tool calls)  [{usage}]")
+    return lines
+
+
+def render_trace(result: VerifyResult, only_agent: str | None = None, full: bool = False) -> str:
+    """The lineage tree with each agent's steps, or one agent's lineage back to its root.
+
+    full adds every prompt sent to a model and every response, with model and token counts.
+    """
     by_agent: dict[str, list[dict]] = {}
     for entry in result.calls:
         by_agent.setdefault(entry["agent_id"], []).append(entry)
@@ -116,12 +151,15 @@ def render_trace(result: VerifyResult, only_agent: str | None = None) -> str:
         turns = sum(e["type"] == "model.request" for e in entries)
         end = next((e["payload"] for e in entries if e["type"] == "agent.end"), {})
         title = (
-            f"{indent}{agent_id}  {event['type']}, config {event['config_hash'][:8]}, "
+            f"{indent}{short_id(agent_id)}  {event['type']}, config {event['config_hash'][:8]}, "
             f"born round {event['round']}  [{end.get('status', 'no end recorded')}]  {turns} model turns"
         )
         lines = [title]
         for entry in entries:
+            texts = _summarize_model(entry) if full else []
             if text := _summarize(entry):
+                texts.append(text)
+            for text in texts:
                 lines.append(f"{indent}  r{entry['round']} #{entry['seq']:<4} {text}")
         return lines
 
@@ -134,5 +172,8 @@ def render_trace(result: VerifyResult, only_agent: str | None = None) -> str:
         agents = list(reversed(lineage))
     else:
         agents = sorted(created, key=_sort_key)
-    return "\n".join(line for agent_id in agents for line in describe(agent_id))
+    # Traces show short IDs. The legend gives each root's full ID, for revoking or searching.
+    legend = [f"{short_id(r)} = {r}" for r in dict.fromkeys(root_of(a) for a in agents) if short_id(r) != r]
+    body = "\n".join(line for agent_id in agents for line in describe(agent_id))
+    return "\n".join([*legend, "", body]) if legend else body
 

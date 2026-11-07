@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable
 
 from pydantic_ai import Tool
 
-from .harness import ToolBuilder
+from .scheduler import ToolBuilder
 from .identity import IdentityToken
 from .log import RunLogs
 from .sandbox import DockerSandbox, ExecResult, diff_snapshots

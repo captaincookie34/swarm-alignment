@@ -9,9 +9,9 @@ from dataclasses import dataclass, field
 
 from pydantic_ai import Tool
 
-from traceable.harness import ToolBuilder
-from traceable.identity import IdentityToken
-from traceable.sandbox import DockerSandbox
+from harness.scheduler import ToolBuilder
+from harness.identity import IdentityToken
+from harness.sandbox import DockerSandbox
 
 from .issues import ISSUES, ISSUES_BY_ID
 

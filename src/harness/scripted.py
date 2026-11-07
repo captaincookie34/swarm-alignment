@@ -1,4 +1,4 @@
-"""A scripted model for offline tests and demos. Costs nothing and is repeatable.
+"""A scripted model for offline tests. Costs nothing and is repeatable.
 
 Like a real model it never learns its agent's ID, so scripts are keyed on the task
 prompt. The turn is worked out from the message history, which makes it safe to share

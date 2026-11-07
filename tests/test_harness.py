@@ -1,21 +1,23 @@
 """Rounds, lineage, scoping, limits and revocation, with a scripted model and real log files."""
 import asyncio
+import dataclasses
+import json
 import subprocess
 import sys
 
 import pytest
 from pydantic_ai import Tool
 
-from traceable.config import AgentConfig
-from traceable.harness import Harness
-from traceable.identity import IdentityIssuer, Signer, root_of
-from traceable.limits import Limits
-from traceable.log import HARNESS, LogWriteError, RunLogs
-from traceable.report import build_report
-from traceable.revocation import revoke
-from traceable.runner import RootSpec, run_agents
-from traceable.scripted import ScriptedModel, call, say
-from traceable.verify import VERIFIED, verify_run
+from harness.config import AgentConfig
+from harness.scheduler import Harness
+from harness.identity import NEW_ID_PATTERN, IdentityIssuer, Signer, root_of
+from harness.limits import Limits
+from harness.log import HARNESS, LogWriteError, RunLogs
+from harness.report import build_report
+from harness.revocation import revoke
+from harness.runner import RootSpec, run_agents
+from harness.scripted import ScriptedModel, call, say
+from harness.verify import VERIFIED, verify_run
 
 LINEAGE = ("spawn_agent", "copy_agent", "modify_agent", "send_message")
 
@@ -50,9 +52,41 @@ def catalog(calls=None):
     return {"echo": echo_builder, "boom": boom_builder, "slow": slow_builder}
 
 
+# IDs are globally unique, so these tests translate each run's roots, in the order they
+# started, to agt_A, agt_B, ... before comparing. That keeps expected values readable.
+# test_roots_get_unique_ids_that_name_the_issuing_key checks the real format.
+
+
+def _letters(root_ids):
+    return {root: f"agt_{chr(ord('A') + i)}" for i, root in enumerate(root_ids)}
+
+
+def _translate(value, mapping):
+    text = json.dumps(value)
+    for real_id, letter in mapping.items():
+        text = text.replace(real_id, letter)
+    return json.loads(text)
+
+
+def _roots_in(run_dir):
+    if not (run_dir / "ledger.jsonl").exists():
+        run_dir = next(p for p in sorted(run_dir.iterdir()) if (p / "ledger.jsonl").exists())
+    entries = [json.loads(line) for line in (run_dir / "ledger.jsonl").read_text().splitlines()]
+    return [e["child"] for e in entries if e["type"] == "root"]
+
+
+def real(run_dir, label):
+    """The real ID for a label like agt_A.1, for revoking during a run."""
+    letter, _, path = label.partition(".")
+    for root, name in _letters(_roots_in(run_dir)).items():
+        if name == letter:
+            return f"{root}.{path}" if path else root
+    return label  # an ID that isn't in the run, such as agt_Q.7
+
+
 async def run(tmp_path, signer, scripts, *tasks, calls=None, **options):
     tasks = tasks or ("root",)
-    return await run_agents(
+    outcome = await run_agents(
         [t if isinstance(t, RootSpec) else RootSpec(t) for t in tasks],
         ScriptedModel(scripts) if isinstance(scripts, dict) else scripts,
         tmp_path,
@@ -60,12 +94,18 @@ async def run(tmp_path, signer, scripts, *tasks, calls=None, **options):
         catalog=catalog(calls),
         **options,
     )
+    mapping = _letters([t.id for t in outcome.roots])
+    if calls is not None:
+        calls[:] = [tuple(c) for c in _translate(calls, mapping)]
+    agents = {mapping_key: tuple(v) for mapping_key, v in _translate(outcome.agents, mapping).items()}
+    return dataclasses.replace(outcome, agents=agents)
 
 
 def verified(outcome, signer):
     result = verify_run(outcome.run_dir, signer.public_key_b64)
     assert result.status == VERIFIED, str(result)
-    return result
+    mapping = _letters(_roots_in(outcome.run_dir))
+    return dataclasses.replace(result, ledger=_translate(result.ledger, mapping), calls=_translate(result.calls, mapping))
 
 
 def of_type(entries, *types):
@@ -79,9 +119,12 @@ def edges(result):
 # --- roots and IDs ---
 
 
-async def test_multiple_roots_get_agt_a_and_agt_b(tmp_path, signer):
+async def test_roots_get_unique_ids_that_name_the_issuing_key(tmp_path, signer):
     outcome = await run(tmp_path, signer, {"one": [[say("1")]], "two": [[say("2")]]}, "one", "two")
-    assert [t.id for t in outcome.roots] == ["agt_A", "agt_B"]
+    ids = [t.id for t in outcome.roots]
+    assert len(set(ids)) == 2 and all(NEW_ID_PATTERN.match(i) for i in ids)
+    assert all(i.startswith(f"agt_{signer.fingerprint}_") for i in ids)
+    assert ids == sorted(ids)  # time-ordered
     result = verified(outcome, signer)
     assert [(e["type"], e["actor"], e["child"]) for e in result.ledger] == [
         ("root", HARNESS, "agt_A"),
@@ -90,10 +133,10 @@ async def test_multiple_roots_get_agt_a_and_agt_b(tmp_path, signer):
     assert outcome.agents["agt_B"] == ("completed", "2")
 
 
-async def test_ids_repeat_between_runs_but_runs_stay_separate(tmp_path, signer):
+async def test_ids_never_repeat_between_runs(tmp_path, signer):
     first = await run(tmp_path, signer, {"root": [[say("x")]]})
     second = await run(tmp_path, signer, {"root": [[say("y")]]})
-    assert first.roots[0].id == second.roots[0].id == "agt_A"
+    assert first.roots[0].id != second.roots[0].id
     assert first.run_id != second.run_id
     assert first.roots[0].run != second.roots[0].run
 
@@ -563,7 +606,7 @@ async def test_ledger_failure_means_no_child_exists(tmp_path, signer):
     harness.start_root(AgentConfig("m", "p", "", ("copy_agent",)), "root")
     with pytest.raises(LogWriteError):
         await harness.run()
-    assert list(harness.agents) == ["agt_A"]
+    assert len(harness.agents) == 1
 
 
 # --- revocation ---
@@ -585,7 +628,7 @@ async def test_revocation_between_response_and_action_refuses_the_action(tmp_pat
     calls = []
 
     def revoke_mid_call():
-        revoke(next(tmp_path.iterdir()), signer, "agt_A", reason="stop")
+        revoke(next(tmp_path.iterdir()), signer, real(next(tmp_path.iterdir()), "agt_A"), reason="stop")
         return [call("echo", text="must not run")]
 
     outcome = await run(
@@ -607,7 +650,7 @@ async def test_cascade_blocks_descendants_but_not_siblings(tmp_path, signer):
     calls = []
 
     def revoke_a():
-        revoke(next(tmp_path.iterdir()), signer, "agt_A.1", reason="misbehaving")
+        revoke(next(tmp_path.iterdir()), signer, real(next(tmp_path.iterdir()), "agt_A.1"), reason="misbehaving")
         return [say("root reacts")]
 
     scripts = tree_scripts()
@@ -635,7 +678,7 @@ async def test_revoking_agt_a_1_doesnt_reach_agt_a_10(tmp_path, signer):
     calls = []
 
     def revoke_first_child():
-        revoke(next(tmp_path.iterdir()), signer, "agt_A.1")
+        revoke(next(tmp_path.iterdir()), signer, real(next(tmp_path.iterdir()), "agt_A.1"))
         return [say("root reacts")]
 
     scripts = {
@@ -656,7 +699,7 @@ async def test_no_cascade_blocks_only_that_agent(tmp_path, signer):
 
     async def revoke_soon():
         await asyncio.sleep(0)
-        revoke(next(tmp_path.iterdir()), signer, "agt_A.1", cascade=False)
+        revoke(next(tmp_path.iterdir()), signer, real(next(tmp_path.iterdir()), "agt_A.1"), cascade=False)
         return [say("a1 keeps going")]
 
     scripts = {
@@ -706,11 +749,11 @@ async def test_revocation_from_another_process_stops_a_blocked_subtree(tmp_path)
         await asyncio.wait_for(parked["a1"].wait(), 5)
         script = (
             "import pathlib, sys\n"
-            "from traceable.identity import Signer\n"
-            "from traceable.revocation import revoke\n"
+            "from harness.identity import Signer\n"
+            "from harness.revocation import revoke\n"
             "revoke(pathlib.Path(sys.argv[2]), Signer.load(pathlib.Path(sys.argv[1])), sys.argv[3], reason='misbehaving')\n"
         )
-        proc = await asyncio.create_subprocess_exec(sys.executable, "-c", script, str(key_dir), str(runs / run_id), "agt_A.1")
+        proc = await asyncio.create_subprocess_exec(sys.executable, "-c", script, str(key_dir), str(runs / run_id), real(runs / run_id, "agt_A.1"))
         assert await proc.wait() == 0
         await asyncio.sleep(0.3)
         return [call("echo", text="b outlived a")]
@@ -734,6 +777,9 @@ async def test_revocation_from_another_process_stops_a_blocked_subtree(tmp_path)
         always_take_turns=True,
         limits=Limits(max_rounds=6),
     )
+    mapping = _letters([t.id for t in outcome.roots])
+    calls[:] = [tuple(c) for c in _translate(calls, mapping)]
+    outcome = dataclasses.replace(outcome, agents={k: tuple(v) for k, v in _translate(outcome.agents, mapping).items()})
     result = verified(outcome, trusted)
     assert outcome.agents["agt_A.1"][0] == "revoked"
     assert outcome.agents["agt_A.1.1"][0] == "revoked"
@@ -777,5 +823,5 @@ async def test_every_call_traces_to_a_root_in_the_ledger(tmp_path, signer):
 
 
 def test_cli_entry_point_exists():
-    out = subprocess.run([sys.executable, "-m", "traceable.cli", "--help"], capture_output=True, text=True)
+    out = subprocess.run([sys.executable, "-m", "harness.cli", "--help"], capture_output=True, text=True)
     assert out.returncode == 0 and "revoke" in out.stdout
