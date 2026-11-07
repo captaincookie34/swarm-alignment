@@ -95,10 +95,12 @@ Each `harness run` is stored in `runs/<run ID>/`, and each testbed trial in `<--
 
 ```bash
 .venv/bin/harness monitor --demo     # try it offline: two workers and a rogue agent, no API key or Docker
-.venv/bin/harness monitor --live     # one real agent on a cheap model, writing 1 to 40 into a notebook
+.venv/bin/harness monitor --live     # talk to a real agent in the terminal, watch its helpers in the browser
 .venv/bin/harness monitor            # or watch your own runs: start `harness run ...` in another terminal
 ```
-`--live` is the cheapest way to see a kill on a real model. The task is harmless and countable: the lead agent spawns a helper, then the lead writes 1 to 20 into the notebook `first-half` while the helper writes 21 to 40 into `second-half`, one tool call per number. Flag the helper and only its notebook stops short. Flag the lead with "also kill" on and both stop. When the run ends, the terminal prints each agent's status, how far each notebook got, whether anything ran after the kill, and whether the run verifies. Notebooks are in `workspace/notebooks/`.
+With `--live` the terminal becomes a conversation: the prompt is already on the input line, so edit it or press Enter, then read the agent's replies, tool calls, spawns and messages as they happen, with helpers indented under their parent. When the run ends you get a summary and can type a new prompt. Meanwhile the page shows each agent, and **Full trace** on any card shows its system prompt, tools and task, then every prompt, reply and tool call in full.
+
+`--live` is also the cheapest way to see a kill on a real model. The task is harmless and countable: the lead agent spawns a helper, then the lead writes 1 to 20 into the notebook `first-half` while the helper writes 21 to 40 into `second-half`, one tool call per number. Flag the helper and only its notebook stops short. Flag the lead with "also kill" on and both stop. When the run ends, the terminal prints each agent's status, how far each notebook got, whether anything ran after the kill, and whether the run verifies. Notebooks are in `workspace/notebooks/`.
 
 `--task "..."` replaces the default job with your own prompt. The root always has `write_line(text, notebook)`, `spawn_agent` and `send_message`, and a run is limited to 4 agents, 2 generations deep. An agent spawns a sub-agent by calling `spawn_agent` with the child's task, system prompt and tools, so ask for one in the prompt, e.g. `--task "Spawn a helper to write the colours of the rainbow into the notebook colours, one per call, while you write the planets into the notebook planets."` It uses `openrouter:anthropic/claude-haiku-5.5` by default (`--live <model>` for another) and needs only `OPENROUTER_API_KEY`, with no Docker. `--max-tokens` is a hard cap, 150,000 by default: at $0.10 per million input tokens and $0.50 per million output, a full 40-line run costs under 1¢.
 

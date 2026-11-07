@@ -155,7 +155,7 @@ def cmd_monitor(args: argparse.Namespace) -> int:
             outcome = asyncio.run(run_demo(args.runs_dir, signer, args.pace or 1.5))
             print(f"demo run {outcome.run_id} ended: {outcome.status}. Next: harness verify {outcome.run_id}")
         elif args.live:
-            _live(args, signer)
+            _live(args, server, url)
         while True:
             time.sleep(3600)
     except KeyboardInterrupt:
@@ -165,20 +165,32 @@ def cmd_monitor(args: argparse.Namespace) -> int:
     return 0
 
 
-def _live(args: argparse.Namespace, signer: Signer) -> None:
-    """A real agent and the helpers it spawns write into notebooks. Afterwards, show how far each got."""
-    from .monitor_demo import live_summary, live_task, run_live
+def _live(args: argparse.Namespace, server, url: str) -> None:
+    """A conversation in the terminal: edit the prompt, press Enter, and read the run as it happens,
+    while the page shows the agents it spawns and their full traces. Each prompt starts a new run."""
+    from .live_chat import Transcript, ask
+    from .monitor_demo import live_summary, live_task
     from .runner import resolve_model
 
     resolve_model(args.live)  # a missing key fails here, before a run exists
-    task = args.task or live_task(args.target)
-    print(f"live: {args.live}, tools write_line, spawn_agent and send_message, capped at {args.max_tokens:,} tokens.")
-    print(f"task: {task}")
-    print("Flag an agent in the page part-way through to stop it.\n")
-    outcome = asyncio.run(run_live(args.runs_dir, signer, args.live, args.target, args.pace or 2.0, args.max_tokens, args.task))
-    run_dir = args.runs_dir / outcome.run_id
-    print("\n" + "\n".join(live_summary(run_dir, outcome, signer.public_key_b64)))
-    print(f"Next: harness trace {outcome.run_id}   or   ls {run_dir / 'workspace' / 'notebooks'}")
+    monitor = server.monitor
+    monitor.announce = False  # this terminal prints its own transcript and summary
+    colour = sys.stdout.isatty()
+    print(f"\nModel {args.live}. Each run is capped at {args.max_tokens:,} tokens.")
+    print(f"Agents, lineage and full traces: {url}  Flag any agent there to kill it.")
+    print("Edit the prompt or press Enter to start it. Ctrl-C to quit.\n")
+    default = args.task or live_task(args.target)
+    while True:
+        task = ask(default, colour)
+        if not task:
+            continue
+        run_id = monitor.start(task, args.live, args.max_tokens, args.pace or 2.0)
+        print(f"  run {run_id}")
+        Transcript(args.runs_dir / run_id, colour).follow()
+        monitor.wait()
+        print("\n".join(live_summary(args.runs_dir / run_id, monitor.outcomes[run_id], monitor.signer.public_key_b64)))
+        print(f"Full record: harness trace {run_id}\n\nType a prompt for a new run, or Ctrl-C to quit.")
+        default = ""
 
 
 def add_trace_argument(parser: argparse.ArgumentParser) -> None:

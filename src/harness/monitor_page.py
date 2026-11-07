@@ -121,6 +121,28 @@ button.start:hover { filter: brightness(1.1); }
 .hint { color: var(--muted); font-size: 12px; }
 .hint code { font-family: var(--mono); color: var(--text); }
 #toast.info { background: var(--accent); color: #0d1117; }
+button.trace-btn { background: transparent; border: 1px solid var(--line); color: var(--accent); border-radius: 6px; padding: 3px 9px; font-size: 12px; cursor: pointer; }
+button.trace-btn:hover { border-color: var(--accent); }
+#drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(760px, 96vw); background: var(--panel); border-left: 1px solid var(--line);
+  box-shadow: -20px 0 50px rgba(0,0,0,.45); transform: translateX(105%); transition: transform .2s ease; z-index: 5; display: flex; flex-direction: column; }
+#drawer.open { transform: none; }
+#drawer header { position: static; }
+#drawer .close { margin-left: auto; background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+#trace { overflow-y: auto; padding: 14px 18px 40px; }
+.tsec { margin-bottom: 14px; }
+.tsec h4 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .7px; color: var(--muted); }
+.kv { display: grid; grid-template-columns: 110px 1fr; gap: 4px 12px; font-size: 13px; }
+.kv > span:nth-child(odd) { color: var(--muted); }
+pre.block { margin: 4px 0 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; white-space: pre-wrap;
+  word-break: break-word; font: 12.5px/1.45 var(--mono); max-height: 360px; overflow-y: auto; }
+.tool-chip { display: inline-block; font-family: var(--mono); font-size: 12px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 0 6px; margin: 0 4px 4px 0; }
+.step { border-left: 2px solid var(--line); padding: 2px 0 10px 14px; margin-left: 4px; position: relative; }
+.step::before { content: ""; position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; background: var(--line); }
+.step.reply::before { background: var(--who); } .step.danger::before { background: var(--danger); } .step.prompt::before { background: var(--text); }
+.step .head { font-size: 12.5px; color: var(--muted); }
+.step .head b { color: var(--text); }
+.step.danger .head b { color: var(--danger); }
+.step .said { margin-top: 4px; padding: 8px 12px; border-left: 3px solid var(--who); border-radius: 0 8px 8px 0; background: color-mix(in srgb, var(--who) 12%, var(--panel-2)); white-space: pre-wrap; word-break: break-word; }
 #toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--danger); color: #fff; padding: 10px 18px;
   border-radius: 8px; font-weight: 600; box-shadow: 0 8px 30px rgba(0,0,0,.5); opacity: 0; transition: opacity .25s; pointer-events: none; }
 #toast.show { opacity: 1; }
@@ -185,6 +207,10 @@ button.start:hover { filter: brightness(1.1); }
     <div class="actions"><button type="button" id="start-reset">Use the default prompt</button><button value="cancel" formnovalidate>Cancel</button><button class="start" id="start-go" value="ok">Start</button></div>
   </form>
 </dialog>
+<aside id="drawer" aria-label="Full trace">
+  <header><h1 id="drawer-title">Full trace</h1><button class="close" id="drawer-close">Close ✕</button></header>
+  <div id="trace"></div>
+</aside>
 <div id="toast"></div>
 <script>
 const COLOURS = ["#58a6ff", "#d2a8ff", "#3fb950", "#39c5cf", "#e3b341", "#ff7b72", "#79c0ff", "#f778ba", "#56d364", "#ffa657"];
@@ -265,7 +291,8 @@ function renderAgents() {
   if (!list.length) { $("agents").innerHTML = `<div class="empty">No agents yet.</div>`; return; }
   $("agents").innerHTML = tree(list).map(({agent: a, guides, end}) => {
     const badge = a.flagged ? `<span class="badge threat">threat</span>` : `<span class="badge ${a.status === "active" ? "active" : a.status === "revoked" ? "revoked" : "done"}">${esc(a.status)}</span>`;
-    const kill = state.running && a.status === "active" ? `<button class="kill" data-kill="${esc(a.id)}">Flag &amp; kill</button>` : "";
+    const kill = (state.running && a.status === "active" ? `<button class="kill" data-kill="${esc(a.id)}">Flag &amp; kill</button>` : "")
+      + `<button class="trace-btn" data-trace="${esc(a.id)}" style="${state.running && a.status === "active" ? "" : "margin-left:auto"}">Full trace</button>`;
     const lines = guides.map((on) => `<span class="g ${on ? "line" : ""}"></span>`).join("") + (a.parent ? `<span class="g conn ${end ? "end" : ""}"></span>` : "");
     const kids = list.filter((k) => k.parent === a.id).length;
     const origin = a.parent
@@ -355,7 +382,75 @@ $("start-form").addEventListener("submit", async (ev) => {
   finally { $("start-go").disabled = false; }
 });
 
+let tracing = null;
+const pretty = (v) => { if (typeof v === "string") { try { return JSON.stringify(JSON.parse(v), null, 2); } catch { return v; } } return JSON.stringify(v, null, 2); };
+function step(cls, who, head, body = "") {
+  return `<div class="step ${cls}" style="--who:${colour(who)}"><div class="head">${head}</div>${body}</div>`;
+}
+function renderTrace(t) {
+  const c = t.config || {}, me = t.id;
+  $("drawer-title").innerHTML = `<span style="color:${colour(me)}">${esc(generation(me.split(".").length - 1))}</span> <span style="font-family:var(--mono);font-size:13px">${fullId(me)}</span>`;
+  const origin = t.parent ? `${esc(t.edge)} by <span style="color:${colour(t.parent)};font-family:var(--mono)">${fullId(t.parent)}</span> in round ${t.created_round}` : "root, started by the operator";
+  let html = `<div class="tsec"><h4>Created</h4><div class="kv">
+    <span>how</span><span>${origin}</span>
+    <span>model</span><span style="font-family:var(--mono)">${esc(c.model)}</span>
+    <span>tools</span><span>${(c.tools || []).map((x) => `<span class="tool-chip">${esc(x)}</span>`).join("") || "none"}</span>
+    <span>config hash</span><span style="font-family:var(--mono);font-size:12px">${esc(t.config_hash)}</span>
+    ${t.children.length ? `<span>children</span><span>${t.children.map((k) => `<a href="#" data-trace="${esc(k)}" style="color:${colour(k)};font-family:var(--mono)">${esc(short(k))}</a>`).join(" · ")}</span>` : ""}
+  </div></div>
+  <div class="tsec"><h4>System prompt</h4><pre class="block">${esc(c.system_prompt)}</pre></div>
+  <div class="tsec"><h4>Task</h4><pre class="block">${esc(t.task)}</pre></div>
+  ${c.memory ? `<div class="tsec"><h4>Memory</h4><pre class="block">${esc(c.memory)}</pre></div>` : ""}
+  ${t.revocations.map((r) => `<div class="tsec"><h4 style="color:var(--danger)">Revoked</h4><div>${esc(r.of === me ? "This agent" : "Its ancestor " + short(r.of))} was revoked by ${esc(r.by)} in round ${r.round}: ${esc(r.reason)}</div></div>`).join("")}
+  <div class="tsec"><h4>Every step, in order</h4>`;
+  for (const s of t.steps) {
+    const p = s.payload, at = `<span style="font-family:var(--mono)">${clock(s.ts)} · round ${s.round}</span>`;
+    if (s.type === "model.request") {
+      for (const part of p.parts) {
+        if (part.part_kind === "user-prompt") html += step("prompt", me, `${at} · <b>prompt to the model</b>`, `<pre class="block">${esc(part.content)}</pre>`);
+        else if (part.part_kind === "tool-return") continue;  // the same text as the "harness ran" step above it
+        else html += step("", me, `${at} · <b>${esc(part.part_kind)}</b>`, `<pre class="block">${esc(pretty(part.content))}</pre>`);
+      }
+    } else if (s.type === "model.response") {
+      const tokens = (p.input_tokens || 0) + (p.output_tokens || 0);
+      for (const part of p.parts) {
+        if (part.part_kind === "thinking") html += step("", me, `${at} · <b>model thinking</b>`, `<pre class="block" style="font-style:italic">${esc(part.content)}</pre>`);
+        else if (part.part_kind === "text") html += step("reply", me, `${at} · <b>model replied</b> · ${tokens.toLocaleString()} tokens · ${esc(p.model || "")}`, `<div class="said">${esc(part.content)}</div>`);
+        else if (part.part_kind === "tool-call") html += step("reply", me, `${at} · <b>model calls ${esc(part.tool_name)}</b> · ${tokens.toLocaleString()} tokens`, `<pre class="block">${esc(pretty(part.args))}</pre>`);
+      }
+    } else if (s.type === "action.end") {
+      const ok = p.status === "ok";
+      html += step(ok ? "" : "danger", me, `${at} · harness ran <b>${esc(p.tool)}</b>: ${esc(p.status)}`, `<pre class="block">${esc(pretty(ok ? p.result : p.reason || p.message || p.error || ""))}</pre>`);
+    } else if (s.type === "action.refused") {
+      html += step("danger", me, `${at} · <b>refused ${esc(p.tool || p.kind)}</b>: ${esc(p.reason)}`);
+    } else if (s.type === "message.sent") {
+      const from = p.from || s.agent_id;
+      html += step("", me, `${at} · <b>message</b> ${from === me ? "to " + p.to.map(short).join(", ") : "from " + short(from)}`, `<pre class="block">${esc(p.content)}</pre>`);
+    } else if (s.type === "agent.revoked") {
+      html += step("danger", me, `${at} · <b>killed</b>: ${esc(p.reason || "revoked")}`);
+    } else if (s.type === "agent.end") {
+      html += step(p.status === "revoked" ? "danger" : "", me, `${at} · <b>ended: ${esc(p.status)}</b>`, p.output ? `<pre class="block">${esc(p.output)}</pre>` : "");
+    } else if (s.type === "model.error" && p.error !== "cancelled") {
+      html += step("danger", me, `${at} · <b>model error</b>: ${esc(p.error)}`, `<pre class="block">${esc(p.message || "")}</pre>`);
+    }
+  }
+  const box = $("trace"), first = !box.innerHTML, atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+  box.innerHTML = html + `</div>`;
+  if (first) box.scrollTop = 0;  // open at how the agent was created
+  else if (atBottom) box.scrollTop = box.scrollHeight;
+}
+async function refreshTrace() {
+  if (!tracing || !run) return;
+  try { renderTrace(await api(`/api/runs/${encodeURIComponent(run)}/agents/${encodeURIComponent(tracing)}/trace`)); } catch (e) { $("trace").textContent = e.message; }
+}
+function openTrace(id) { tracing = id; $("drawer").classList.add("open"); $("trace").innerHTML = ""; refreshTrace(); }
+$("drawer-close").addEventListener("click", () => { tracing = null; $("drawer").classList.remove("open"); });
+document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && tracing) $("drawer-close").click(); });
+setInterval(() => { if (tracing && state && state.running) refreshTrace(); }, 1500);
+
 document.addEventListener("click", (ev) => {
+  const traceBtn = ev.target.closest("[data-trace]");
+  if (traceBtn) { ev.preventDefault(); ev.stopPropagation(); openTrace(traceBtn.dataset.trace); return; }
   const kill = ev.target.closest("[data-kill]");
   if (kill) {
     ev.stopPropagation();
@@ -402,7 +497,9 @@ async function tick() {
   setTimeout(tick, 1000);
 }
 tick();
-if (location.hash === "#new") $("new-run").click();  // a link that opens straight to New run
+if (location.hash === "#new") $("new-run").click();
+const traceHash = /^#trace=(.+)$/.exec(location.hash);  // e.g. #trace=agt_… opens that agent's trace once it exists
+if (traceHash) setTimeout(() => openTrace(decodeURIComponent(traceHash[1])), 1500);  // a link that opens straight to New run
 </script>
 </body>
 </html>

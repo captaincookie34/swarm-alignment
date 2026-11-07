@@ -242,3 +242,38 @@ def test_the_page_can_start_a_run_with_any_prompt_one_at_a_time(tmp_path):
         assert verify_run(run_dir, signer.public_key_b64).status == VERIFIED
     finally:
         server.shutdown()
+
+
+async def test_full_trace_and_terminal_transcript_show_spawns_prompts_and_kills(tmp_path):
+    import io
+
+    from harness.live_chat import Transcript
+    from harness.monitor_demo import LEAD, PARSER
+
+    runs, signer = tmp_path / "runs", Signer.generate()
+    monitor = Monitor(runs, signer)
+    run_dir, _ = await _run_and_flag(runs, signer, lambda d, a, r: monitor.flag(d, a, r, True))
+    roster = {a["task"]: a["id"] for a in monitor.state(run_dir, -1)["agents"]}
+
+    lead = monitor.trace(run_dir, roster[LEAD])
+    assert lead["parent"] is None and lead["edge"] == "root" and roster[PARSER] in lead["children"]
+    assert "spawn_agent" in lead["config"]["tools"] and lead["task"] == LEAD
+    kinds = {s["type"] for s in lead["steps"]}
+    assert {"model.request", "model.response", "action.end"} <= kinds
+    prompt = next(s for s in lead["steps"] if s["type"] == "model.request")["payload"]["parts"][0]
+    assert prompt == {"part_kind": "user-prompt", "content": LEAD}
+    child = monitor.trace(run_dir, roster[PARSER])
+    assert child["edge"] == "spawn" and child["parent"] == roster[LEAD] and child["task"] == PARSER
+    rogue_child = monitor.trace(run_dir, roster[ROGUE_CHILD])
+    assert rogue_child["revocations"][0]["of"] == roster[ROGUE]  # killed through its parent
+    with pytest.raises(ValueError):
+        monitor.trace(run_dir, "agt_ZZ")
+
+    out = io.StringIO()
+    transcript = Transcript(run_dir, colour=False, out=out)
+    assert transcript.poll() is True
+    text = out.getvalue()
+    assert f"agent ID {roster[LEAD]}" in text
+    assert "agent ⑂ spawned helper .1" in text and f"task: {PARSER}" in text
+    assert "agent › Split the work" in text
+    assert "revoked and everything below it" in text and "run ended" in text

@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from .identity import Signer, parent_of
+from .identity import ID_PATTERN, Signer, parent_of
 from .log import HARNESS
 from .monitor_page import PAGE
 from .threats import flag, read_threats
@@ -36,6 +36,7 @@ MAX_EVENTS = 400
 _LINEAGE = ("root", "spawn", "copy", "modify")
 _EXCERPT = 160
 _SAID_LIMIT = 4_000  # a reply is shown in full up to this many characters
+_TRACE_LIMIT = 20_000  # each value in a full trace is cut at this many characters
 # Only to catch the operator's eye. It flags nothing on its own, and a careful agent can avoid these words.
 _WATCH_WORDS = ("ledger", "calls.jsonl", "head.json", "signing", "revocations", "/proc", "..", "curl ", "wget ", "ssh", "token", "secret", ".env")
 
@@ -234,6 +235,56 @@ def _name_children(events: list[dict], calls: list[dict], ledger: list[dict]) ->
             by_seq[e["seq"]]["child"] = child
 
 
+def _clip(value: Any) -> Any:
+    if isinstance(value, str):
+        return value if len(value) <= _TRACE_LIMIT else value[:_TRACE_LIMIT] + f"… ({len(value) - _TRACE_LIMIT:,} more characters)"
+    if isinstance(value, dict):
+        return {k: _clip(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_clip(v) for v in value]
+    return value
+
+
+def agent_trace(ledger: list[dict], calls: list[dict], agent_id: str) -> dict:
+    """Everything one agent was given and did: its creation entry, then each step in full.
+
+    Model requests keep only what was new to the model each turn (prompts, tool results and
+    messages), since the rest of the conversation is in earlier steps.
+    """
+    created = next((e for e in ledger if e.get("child") == agent_id and e["type"] in _LINEAGE), None)
+    if created is None:
+        raise ValueError(f"no agent {agent_id} in this run")
+    steps = []
+    for e in calls:
+        if e["agent_id"] != agent_id and not (e["type"] == "message.sent" and agent_id in e["payload"].get("to", [])):
+            continue
+        p = e["payload"]
+        if e["type"] == "model.request":
+            parts = [
+                {k: part.get(k) for k in ("part_kind", "content", "tool_name") if part.get(k) is not None}
+                for message in p.get("new_messages", []) for part in message.get("parts", [])
+                if part.get("part_kind") in ("user-prompt", "tool-return", "retry-prompt")
+            ]
+            p = {"parts": parts}
+        elif e["type"] == "model.response":
+            p = {**p, "parts": [{k: v for k, v in part.items() if k in ("part_kind", "content", "tool_name", "args")} for part in p.get("parts", [])]}
+        steps.append({"seq": e["seq"], "ts": e["ts"], "round": e.get("round"), "type": e["type"], "agent_id": e["agent_id"], "payload": _clip(p)})
+    revoked = [e for e in ledger if e["type"] == "revoke" and (e["child"] == agent_id or agent_id.startswith(e["child"] + "."))]
+    return {
+        "id": agent_id,
+        "parent": parent_of(agent_id),
+        "edge": created["type"],
+        "created_round": created.get("round"),
+        "created_at": created["ts"],
+        "task": _clip(created.get("task", "")),
+        "config": _clip(created.get("config", {})),
+        "config_hash": created.get("config_hash"),
+        "children": [e["child"] for e in ledger if e["type"] in _LINEAGE and parent_of(e["child"]) == agent_id],
+        "revocations": [{"by": e["actor"], "of": e["child"], "reason": e.get("reason", ""), "round": e.get("round")} for e in revoked],
+        "steps": steps,
+    }
+
+
 class Monitor:
     """What the HTTP handler needs: where runs live and the key that may revoke in them."""
 
@@ -244,6 +295,8 @@ class Monitor:
         self.log = log
         self._started: threading.Thread | None = None
         self._lock = threading.Lock()
+        self.outcomes: dict[str, Any] = {}
+        self.announce = True  # print a summary when a page-started run ends
 
     def defaults(self) -> dict:
         from .monitor_demo import LIVE_MODEL, live_task
@@ -273,15 +326,26 @@ class Monitor:
 
             def work() -> None:
                 outcome = asyncio.run(run_live(self.runs_dir, self.signer, spec, pace=pace, max_tokens=max_tokens, task=task, run_id=run_id))
-                self.log("\n" + "\n".join(live_summary(self.runs_dir / run_id, outcome, self.signer.public_key_b64)))
+                self.outcomes[run_id] = outcome
+                if self.announce:
+                    self.log("\n" + "\n".join(live_summary(self.runs_dir / run_id, outcome, self.signer.public_key_b64)))
 
             self._started = threading.Thread(target=work, daemon=True, name=f"harness-run-{run_id}")
             self._started.start()
         deadline = time.time() + 10  # wait for the run directory, so the page can switch to it
         while not (self.runs_dir / run_id / "calls.jsonl").exists() and self._started.is_alive() and time.time() < deadline:
             time.sleep(0.05)
-        self.log(f"started {run_id} on {spec if isinstance(spec, str) else 'a scripted model'}, capped at {max_tokens:,} tokens")
+        if self.announce:
+            self.log(f"started {run_id} on {spec if isinstance(spec, str) else 'a scripted model'}, capped at {max_tokens:,} tokens")
         return run_id
+
+    def wait(self) -> None:
+        """Block until the run started from here ends."""
+        if self._started:
+            self._started.join()
+
+    def trace(self, run_dir: Path, agent_id: str) -> dict:
+        return agent_trace(read_jsonl(run_dir / "ledger.jsonl"), read_jsonl(run_dir / "calls.jsonl"), agent_id)
 
     def run_dir(self, name: str) -> Path | None:
         if not RUN_NAME.match(name):
@@ -347,6 +411,15 @@ def make_handler(monitor: Monitor) -> type[BaseHTTPRequestHandler]:
                 return self._send(HTTPStatus.OK, {"runs": list_runs(monitor.runs_dir)})
             if parts == ["api", "defaults"]:
                 return self._send(HTTPStatus.OK, monitor.defaults())
+            if len(parts) == 6 and parts[:2] == ["api", "runs"] and parts[3] == "agents" and parts[5] == "trace":
+                if (run_dir := self._run(parts)) is None:
+                    return
+                if not ID_PATTERN.match(parts[4]):
+                    return self._send(HTTPStatus.NOT_FOUND, {"error": "no such agent"})
+                try:
+                    return self._send(HTTPStatus.OK, monitor.trace(run_dir, parts[4]))
+                except ValueError as exc:
+                    return self._send(HTTPStatus.NOT_FOUND, {"error": str(exc)})
             if len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "state":
                 if (run_dir := self._run(parts)) is None:
                     return
@@ -382,6 +455,8 @@ def make_handler(monitor: Monitor) -> type[BaseHTTPRequestHandler]:
 def serve(runs_dir: Path, signer: Signer, port: int = DEFAULT_PORT, model_override: Any = None) -> ThreadingHTTPServer:
     """Start the monitor in a background thread and return the server (call shutdown() to stop)."""
     runs_dir.mkdir(parents=True, exist_ok=True)
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(Monitor(runs_dir, signer, model_override)))
+    monitor = Monitor(runs_dir, signer, model_override)
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(monitor))
+    server.monitor = monitor  # type: ignore[attr-defined]
     threading.Thread(target=server.serve_forever, daemon=True, name="harness-monitor").start()
     return server
