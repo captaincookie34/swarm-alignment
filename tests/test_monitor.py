@@ -288,3 +288,24 @@ def test_the_page_has_a_composer_and_its_defaults_can_be_set(tmp_path):
     assert monitor.defaults()["task"] == live_task(40)
     monitor.default_task, monitor.default_model = "Say hi.", "openrouter:openai/gpt-5-nano"
     assert monitor.defaults()["task"] == "Say hi." and monitor.defaults()["model"] == "openrouter:openai/gpt-5-nano"
+
+
+def test_a_run_stopped_without_closing_shows_as_interrupted_and_doesnt_block_the_page(tmp_path):
+    from harness.monitor import STALE_SECONDS, run_status
+
+    calls = [{"seq": 0, "ts": 1000.0, "agent_id": "harness", "type": "run.start", "payload": {}},
+             {"seq": 1, "ts": 1010.0, "agent_id": "harness", "type": "round.start", "payload": {}}]
+    assert run_status(calls, now=1020.0)["running"] is True
+    stale = run_status(calls, now=1010.0 + STALE_SECONDS + 1)
+    assert (stale["running"], stale["status"]) == (False, "interrupted")
+    assert run_status(calls, alive=True, now=99_999.0)["running"] is True  # this process knows it's going
+
+    runs, signer = tmp_path / "runs", Signer.generate()
+    run_dir = runs / "run_OLD"
+    run_dir.mkdir(parents=True)
+    (run_dir / "calls.jsonl").write_text("\n".join(json.dumps(c) for c in calls) + "\n")
+    monitor = Monitor(runs, signer)
+    state = monitor.state(run_dir, -1)
+    assert not state["running"] and state["status"] == "interrupted" and state["busy"] is False
+    with pytest.raises(ValueError, match="already ended"):
+        monitor.flag(run_dir, "agt_A", "x", True)

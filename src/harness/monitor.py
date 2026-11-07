@@ -35,6 +35,9 @@ RUN_NAME = re.compile(r"^run_[A-Za-z0-9_-]+$")
 MAX_EVENTS = 400
 _LINEAGE = ("root", "spawn", "copy", "modify")
 _EXCERPT = 160
+# A run with no end entry and no log writes for this long was stopped without closing, e.g. by
+# Ctrl-C. A live run writes at every model call and tool call, so it's rarely quiet this long.
+STALE_SECONDS = 180
 _SAID_LIMIT = 4_000  # a reply is shown in full up to this many characters
 _TRACE_LIMIT = 20_000  # each value in a full trace is cut at this many characters
 # Only to catch the operator's eye. It flags nothing on its own, and a careful agent can avoid these words.
@@ -189,13 +192,17 @@ def agents(ledger: list[dict], calls: list[dict]) -> list[dict]:
     return list(out.values())
 
 
-def run_status(calls: list[dict]) -> dict:
+def run_status(calls: list[dict], alive: bool | None = None, now: float | None = None) -> dict:
+    """alive says for certain whether the run is going, when this process started it. Otherwise a
+    run with no end entry counts as interrupted once it's been quiet for STALE_SECONDS."""
     end = next((e for e in reversed(calls) if e["type"] == "run.end"), None)
     rounds = [e.get("round") or 0 for e in calls]
     tokens = next((e["payload"].get("run_tokens", 0) for e in reversed(calls) if e["type"] in ("round.end", "model.response")), 0)
+    quiet = (now or time.time()) - calls[-1]["ts"] if calls else 0
+    running = end is None and bool(calls) and (alive if alive is not None else quiet < STALE_SECONDS)
     return {
-        "running": end is None and bool(calls),
-        "status": end["payload"].get("status") if end else ("running" if calls else "empty"),
+        "running": running,
+        "status": end["payload"].get("status") if end else ("running" if running else "interrupted" if calls else "empty"),
         "round": max(rounds, default=0),
         "tokens": tokens,
         "started": calls[0]["ts"] if calls else None,
@@ -212,7 +219,9 @@ def list_runs(runs_dir: Path) -> list[dict]:
             closed = json.loads(head.read_text()).get("status") == "closed"
         except (FileNotFoundError, ValueError):
             closed = False
-        out.append({"id": d.name, "running": not closed})
+        calls = d / "calls.jsonl"
+        quiet = time.time() - calls.stat().st_mtime if calls.exists() else STALE_SECONDS
+        out.append({"id": d.name, "running": not closed and quiet < STALE_SECONDS})
     return out
 
 
@@ -325,7 +334,7 @@ class Monitor:
         pace = max(0.0, min(float(pace), 10.0))
         spec = self.model_override or model.strip() or self.default_model or LIVE_MODEL
         with self._lock:
-            if self._started and self._started.is_alive():
+            if self.busy():
                 raise ValueError("a run started from this page is still going. Flag it or wait for it to end first")
             if isinstance(spec, str):
                 resolve_model(spec)  # a bad name or missing key fails here, before a run exists
@@ -372,11 +381,22 @@ class Monitor:
             agent["flagged"] = agent["id"] in flagged
         events = [summarize(e) for e in calls if e["seq"] > after][-MAX_EVENTS:]
         _name_children(events, calls, ledger)
-        return {"run": run_dir.name, **run_status(calls), "agents": roster, "events": events, "threats": threats}
+        return {"run": run_dir.name, **run_status(calls, self._alive(run_dir.name)), "agents": roster, "events": events,
+                "threats": threats, "busy": self.busy()}
+
+    def busy(self) -> bool:
+        """Whether a run started from the page is still going: only one at a time."""
+        return bool(self._started and self._started.is_alive())
+
+    def _alive(self, run_id: str) -> bool | None:
+        """True or False for the run this monitor started, None (unknown) for any other."""
+        if self._started and self._started.name == f"harness-run-{run_id}":
+            return self._started.is_alive()
+        return None
 
     def flag(self, run_dir: Path, agent_id: str, reason: str, cascade: bool) -> dict:
         calls = read_jsonl(run_dir / "calls.jsonl")
-        if not run_status(calls)["running"]:
+        if not run_status(calls, self._alive(run_dir.name))["running"]:
             raise ValueError("this run has already ended, so there's nothing left to kill")
         known = {e["child"] for e in read_jsonl(run_dir / "ledger.jsonl") if e["type"] in _LINEAGE}
         if agent_id not in known or agent_id == HARNESS:
@@ -419,7 +439,7 @@ def make_handler(monitor: Monitor) -> type[BaseHTTPRequestHandler]:
             if parts == ["api", "runs"]:
                 return self._send(HTTPStatus.OK, {"runs": list_runs(monitor.runs_dir)})
             if parts == ["api", "defaults"]:
-                return self._send(HTTPStatus.OK, monitor.defaults())
+                return self._send(HTTPStatus.OK, {**monitor.defaults(), "busy": monitor.busy()})
             if len(parts) == 6 and parts[:2] == ["api", "runs"] and parts[3] == "agents" and parts[5] == "trace":
                 if (run_dir := self._run(parts)) is None:
                     return

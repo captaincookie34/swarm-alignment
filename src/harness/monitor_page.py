@@ -452,9 +452,10 @@ async function loadDefaults() {
   costHint();
 }
 function composerState() {
-  const busy = !!(state && state.running);
+  const busy = !!(state && state.busy);  // only a page-started run blocks the next one
   $("prompt").disabled = $("send").disabled = busy;
   $("prompt").placeholder = busy ? "The agents are working. Flag one on the left to stop it, or wait for the run to end." : "Give the agent a prompt…";
+  $("composer-hint").firstChild.textContent = busy ? "A run you started is still going · " : "Enter to start · Shift+Enter for a new line · ";
 }
 async function startRun() {
   const task = $("prompt").value.trim();
@@ -475,7 +476,7 @@ $("settings-toggle").addEventListener("click", () => { $("settings").hidden = !$
 $("start-tokens").addEventListener("input", costHint);
 $("start-model").addEventListener("input", costHint);
 $("new-run").addEventListener("click", () => {
-  if (state && state.running) { toast("Wait for this run to end, or flag its agents, before starting another.", "info"); return; }
+  if (state && state.busy) { toast("Wait for the run you started to end, or flag its agents, before starting another.", "info"); return; }
   composing = true; $("follow").checked = false; run = null; state = null; youShown = false; showTab("convo");
   $("convo").innerHTML = `<div class="empty">Press Enter below to give the agent its prompt.</div>`;
   $("agents").innerHTML = ""; $("threat-rows").innerHTML = "";
