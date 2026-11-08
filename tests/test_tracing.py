@@ -9,7 +9,7 @@ pytest.importorskip("opentelemetry.sdk")
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter  # noqa: E402
 
 from harness.export import export_run  # noqa: E402
-from harness.identity import short_id  # noqa: E402
+from harness.identity import Lineage, short_id  # noqa: E402
 from harness.runner import RootSpec, run_agents  # noqa: E402
 from harness.scripted import ScriptedModel, call, say  # noqa: E402
 from harness.verify import VERIFIED, verify_run  # noqa: E402
@@ -41,10 +41,11 @@ async def test_agents_nest_by_lineage_with_their_config(tmp_path, signer):
     outcome, spans = await run_and_export(tmp_path, signer)
     by_name = {s.name: s for s in spans}
     root = outcome.roots[0].id
+    (child_id,) = Lineage.from_ledger(verify_run(outcome.run_dir, signer.public_key_b64).ledger).children(root)
     # Span names use the short ID; attributes keep the full one.
     run, parent = by_name[f"run {outcome.run_id}"], by_name[f"agent {short_id(root)}"]
-    child = by_name[f"agent {short_id(root + '.1')}"]
-    assert child.attributes["harness.agent.id"] == f"{root}.1"
+    child = by_name[f"agent {short_id(child_id)}"]
+    assert child.attributes["harness.agent.id"] == child_id
     assert parent in children_of(spans, run) and child in children_of(spans, parent)
     assert child.attributes["harness.lineage.edge"] == "copy"
     assert child.attributes["harness.config.hash"] == parent.attributes["harness.config.hash"]
@@ -121,7 +122,8 @@ async def test_trace_flag_exports_the_finished_run(tmp_path, signer):
     outcome = await run_agents([RootSpec("root")], ScriptedModel(SCRIPTS), tmp_path, signer, trace_exporter=exporter)
     assert verify_run(outcome.run_dir, signer.public_key_b64).status == VERIFIED
     root = outcome.roots[0].id
-    assert {f"agent {short_id(root)}", f"agent {short_id(root + '.1')}"} <= {s.name for s in exporter.get_finished_spans()}
+    (child,) = Lineage.from_ledger(verify_run(outcome.run_dir, signer.public_key_b64).ledger).children(root)
+    assert {f"agent {short_id(root)}", f"agent {short_id(child)}"} <= {s.name for s in exporter.get_finished_spans()}
 
 
 async def test_a_viewer_thats_down_cant_break_the_run(tmp_path, signer):

@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .identity import parent_of, short_id
+from .identity import Lineage, short_id
 from .log import HARNESS
 from .verify import VERIFIED, VerifyResult
 
@@ -142,12 +142,14 @@ def export_run(result: VerifyResult, run_id: str, endpoint: str = DEFAULT_ENDPOI
     # Agents, nested by lineage, from the ledger.
     ends = {e["agent_id"]: e for e in calls if e["type"] == "agent.end"}
     agents: dict[str, Any] = {}
+    lineage = Lineage.from_ledger(ledger)
     for e in ledger:
         if e["type"] == "revoke":
             continue
         agent, config = e["child"], e.get("config", {})
         end = ends.get(agent)
-        parent_span = agents[parent_of(agent)][0] if parent_of(agent) in agents else run_span
+        parent = lineage.parent(agent)
+        parent_span = agents[parent][0] if parent in agents else run_span
         span = start(f"agent:{agent}", f"agent {short_id(agent)}", parent_span, e["ts"], {
             "openinference.span.kind": "AGENT",
             "gen_ai.agent.name": agent,

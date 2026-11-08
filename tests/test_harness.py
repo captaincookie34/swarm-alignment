@@ -10,7 +10,7 @@ from pydantic_ai import Tool
 
 from harness.config import AgentConfig
 from harness.scheduler import Harness
-from harness.identity import NEW_ID_PATTERN, IdentityIssuer, Signer, root_of
+from harness.identity import NEW_ID_PATTERN, IdentityIssuer, Lineage, Signer
 from harness.limits import Limits
 from harness.log import HARNESS, LogWriteError, RunLogs
 from harness.report import build_report
@@ -52,13 +52,23 @@ def catalog(calls=None):
     return {"echo": echo_builder, "boom": boom_builder, "slow": slow_builder}
 
 
-# IDs are globally unique, so these tests translate each run's roots, in the order they
-# started, to agt_A, agt_B, ... before comparing. That keeps expected values readable.
-# test_roots_get_unique_ids_that_name_the_issuing_key checks the real format.
+# IDs are globally unique and carry no lineage, so these tests translate each run's IDs to
+# readable labels before comparing: roots, in the order they started, become agt_A, agt_B, ...,
+# and each descendant gets its root's label plus its child numbers from the ledger, so agt_A.2.1
+# is the first child of agt_A's second child. The labels are built from the ledger's lineage, so
+# asserting agt_A.1.1 asserts who created whom. test_roots_get_unique_ids_that_name_the_issuing_key
+# and test_child_ids_are_opaque check the real format.
 
 
-def _letters(root_ids):
-    return {root: f"agt_{chr(ord('A') + i)}" for i, root in enumerate(root_ids)}
+def _labels(ledger):
+    lineage = Lineage.from_ledger(ledger)
+    roots = [e["child"] for e in ledger if e["type"] == "root"]
+    letters = {root: f"agt_{chr(ord('A') + i)}" for i, root in enumerate(roots)}
+    return {
+        agent: letters[lineage.root(agent)] + (f".{lineage.path(agent)}" if lineage.path(agent) else "")
+        for agent in [e["child"] for e in ledger if e["type"] != "revoke"]
+        if lineage.root(agent) in letters
+    }
 
 
 def _translate(value, mapping):
@@ -68,19 +78,17 @@ def _translate(value, mapping):
     return json.loads(text)
 
 
-def _roots_in(run_dir):
+def _ledger_in(run_dir):
     if not (run_dir / "ledger.jsonl").exists():
         run_dir = next(p for p in sorted(run_dir.iterdir()) if (p / "ledger.jsonl").exists())
-    entries = [json.loads(line) for line in (run_dir / "ledger.jsonl").read_text().splitlines()]
-    return [e["child"] for e in entries if e["type"] == "root"]
+    return [json.loads(line) for line in (run_dir / "ledger.jsonl").read_text().splitlines()]
 
 
 def real(run_dir, label):
     """The real ID for a label like agt_A.1, for revoking during a run."""
-    letter, _, path = label.partition(".")
-    for root, name in _letters(_roots_in(run_dir)).items():
-        if name == letter:
-            return f"{root}.{path}" if path else root
+    for agent, name in _labels(_ledger_in(run_dir)).items():
+        if name == label:
+            return agent
     return label  # an ID that isn't in the run, such as agt_Q.7
 
 
@@ -94,7 +102,7 @@ async def run(tmp_path, signer, scripts, *tasks, calls=None, **options):
         catalog=catalog(calls),
         **options,
     )
-    mapping = _letters([t.id for t in outcome.roots])
+    mapping = _labels(_ledger_in(outcome.run_dir))
     if calls is not None:
         calls[:] = [tuple(c) for c in _translate(calls, mapping)]
     agents = {mapping_key: tuple(v) for mapping_key, v in _translate(outcome.agents, mapping).items()}
@@ -104,7 +112,7 @@ async def run(tmp_path, signer, scripts, *tasks, calls=None, **options):
 def verified(outcome, signer):
     result = verify_run(outcome.run_dir, signer.public_key_b64)
     assert result.status == VERIFIED, str(result)
-    mapping = _letters(_roots_in(outcome.run_dir))
+    mapping = _labels(_ledger_in(outcome.run_dir))
     return dataclasses.replace(result, ledger=_translate(result.ledger, mapping), calls=_translate(result.calls, mapping))
 
 
@@ -131,6 +139,35 @@ async def test_roots_get_unique_ids_that_name_the_issuing_key(tmp_path, signer):
         ("root", HARNESS, "agt_B"),
     ]
     assert outcome.agents["agt_B"] == ("completed", "2")
+
+
+async def test_child_ids_are_opaque_and_lineage_is_in_the_ledger(tmp_path, signer):
+    """A child's ID is as random as a root's: no path, nothing shared with its parent or
+    siblings. Who created whom is in the ledger, and each token signs its parent and root."""
+    model = ScriptedModel(
+        {
+            "root": [[call("copy_agent", task="a"), call("copy_agent", task="b")], [say("done")]],
+            "a": [[call("copy_agent", task="a1")], [say("a done")]],
+            "a1": [[say("a1 done")]],
+            "b": [[say("b done")]],
+        }
+    )
+    outcome = await run(tmp_path, signer, model, limits=Limits(max_rounds=5))
+    raw = verify_run(outcome.run_dir, signer.public_key_b64)
+    assert raw.status == VERIFIED, str(raw)
+    created = [e for e in raw.ledger if e["type"] != "revoke"]
+    ids = [e["child"] for e in created]
+    assert len(ids) == len(set(ids)) == 4
+    assert all(NEW_ID_PATTERN.match(i) and "." not in i for i in ids)
+    root = ids[0]
+    assert len({i[-16:] for i in ids}) == 4  # the random part is fresh for every agent
+    lineage = Lineage.from_ledger(raw.ledger)
+    for e in created[1:]:
+        assert e["token"]["parent"] == e["actor"] == lineage.parent(e["child"])
+        assert e["token"]["root"] == root and e["token"]["depth"] == lineage.depth(e["child"])
+    a1 = next(e["child"] for e in created if e["task"] == "a1")
+    assert lineage.depth(a1) == 2 and lineage.root(a1) == root
+    assert set(_labels(raw.ledger).values()) == {"agt_A", "agt_A.1", "agt_A.2", "agt_A.1.1"}
 
 
 async def test_ids_never_repeat_between_runs(tmp_path, signer):
@@ -388,6 +425,42 @@ async def test_messages_arrive_next_round_with_harness_stamped_aliases(tmp_path,
     verified(outcome, signer)
     prompts = [repr(messages[-1].parts) for messages, _ in model.requests if "result is 42" in repr(messages[-1].parts)]
     assert prompts and "From child_1: result is 42" in prompts[0]
+
+
+async def test_parent_messages_each_child_by_child_number(tmp_path, signer):
+    """child_N is the parent's Nth child in the ledger, now that IDs carry no number."""
+    model = ScriptedModel(
+        {
+            "root": [
+                [call("copy_agent", task="first"), call("copy_agent", task="second")],
+                [call("send_message", to="child_2", content="for the second"), call("send_message", to="child_1", content="for the first")],
+                [say("done")],
+            ],
+            "first": [[say("waiting")], [say("first got it")]],
+            "second": [[say("waiting")], [say("second got it")]],
+        }
+    )
+    outcome = await run(tmp_path, signer, model, limits=Limits(max_rounds=5))
+    result = verified(outcome, signer)
+    sent = {e["payload"]["content"]: e["payload"]["to"] for e in of_type(result.calls, "message.sent") if e["agent_id"] == "agt_A"}
+    assert sent == {"for the second": ["agt_A.2"], "for the first": ["agt_A.1"]}
+    assert edges(result)["agt_A.2"]["task"] == "second"
+    prompts = [repr(m[-1].parts) for m, _ in model.requests]
+    assert any("From parent: for the second" in p for p in prompts)
+    ends = [e["payload"] for e in of_type(result.calls, "action.end") if e["payload"]["tool"] == "send_message"]
+    assert all(e["status"] == "ok" for e in ends)
+
+
+async def test_child_alias_past_the_last_child_is_refused(tmp_path, signer):
+    model = ScriptedModel(
+        {
+            "root": [[call("copy_agent", task="kid")], [call("send_message", to="child_2", content="x"), call("send_message", to="child_0", content="x")], [say("done")]],
+            "kid": [[say("k")]],
+        }
+    )
+    outcome = await run(tmp_path, signer, model, limits=Limits(max_rounds=4))
+    ends = [e["payload"] for e in of_type(verified(outcome, signer).calls, "action.end") if e["payload"]["tool"] == "send_message"]
+    assert [e["status"] for e in ends] == ["refused", "refused"]
 
 
 async def test_children_report_to_their_parent_without_their_id(tmp_path, signer):
@@ -714,6 +787,62 @@ async def test_no_cascade_blocks_only_that_agent(tmp_path, signer):
     assert [e["cascade"] for e in verified(outcome, signer).ledger if e["type"] == "revoke"] == [False]
 
 
+async def test_cascade_stops_a_revoked_parent_and_its_child_from_acting_or_spawning(tmp_path, signer):
+    calls = []
+
+    def revoke_self_then_try():
+        revoke(next(tmp_path.iterdir()), signer, real(next(tmp_path.iterdir()), "agt_A.1"), reason="stop")
+        return [call("copy_agent", task="late"), call("echo", text="a after revoke")]
+
+    scripts = {
+        "root": [[call("copy_agent", task="a")], [say("wait")], [say("wait")], [say("done")]],
+        "a": [[call("copy_agent", task="a1")], [say("a waits")], revoke_self_then_try, [say("never")]],
+        "a1": [[say("a1 waits")], [call("copy_agent", task="late"), call("echo", text="a1 after revoke")], [say("never")]],
+        "late": [[call("echo", text="late acting")]],
+    }
+    outcome = await run(
+        tmp_path, signer, scripts, calls=calls, always_take_turns=True, revocation_poll_seconds=60, limits=Limits(max_rounds=6)
+    )
+    result = verified(outcome, signer)
+    assert outcome.agents["agt_A.1"][0] == "revoked" and outcome.agents["agt_A.1.1"][0] == "revoked"
+    assert outcome.agents["agt_A"][0] != "revoked"
+    assert sorted(edges(result)) == ["agt_A", "agt_A.1", "agt_A.1.1"]  # no "late" child
+    assert not [c for c in calls if "after revoke" in c[1] or c[1] == "late acting"]
+    refused = {(e["agent_id"], e["payload"].get("tool")) for e in of_type(result.calls, "action.refused")}
+    assert {("agt_A.1", "copy_agent"), ("agt_A.1", "echo")} <= refused
+    report = build_report(result)
+    assert report.actions_after_revocation == 0
+
+
+async def test_cascade_covers_a_descendant_created_after_the_revocation(tmp_path, signer):
+    """If a child is ever recorded under a revoked ancestor, the cascade covers it: descendants
+    come from the lineage at check time, not from a list made when the revocation landed."""
+    run_dir = tmp_path / "run_late"
+    logs = RunLogs(run_dir, signer, "run_late")
+    logs.call(HARNESS, "run.start")
+    model = ScriptedModel({"root": [[say("done")]]})
+    harness = Harness(run_dir, signer, IdentityIssuer(signer, "run_late"), logs, {"m": model}, catalog=catalog())
+    config = AgentConfig("m", "p", "", ("copy_agent", "echo"))
+    root = harness.start_root(config, "root")
+    child = harness._create_child(root.id, "copy", config, "child") and harness.lineage.children(root.id)[0]
+    revoke(run_dir, signer, child)
+    assert harness.refusal_for(root) is None  # applies the revocation
+    assert harness.agents[child].status == "revoked"
+    # A child slipping in afterwards, as in a race with a call already past its checks.
+    harness.agents[child].status = "active"
+    harness._create_child(child, "copy", config, "grandchild")
+    harness.agents[child].status = "revoked"
+    grandchild = harness.lineage.children(child)[0]
+    assert harness.agents[grandchild].status == "revoked"
+    assert "revoked" in harness.refusal_for(harness.agents[grandchild].token)
+    logs.close("completed")
+    result = verify_run(run_dir, signer.public_key_b64)
+    assert result.status == VERIFIED, str(result)
+    revoked = [e for e in result.calls if e["type"] == "agent.revoked"]
+    assert [e["agent_id"] for e in revoked] == [child, grandchild]
+    assert revoked[1]["payload"]["revoked_id"] == child
+
+
 async def test_revocation_of_unknown_id_changes_nothing(tmp_path, signer):
     def revoke_ghost():
         revoke(next(tmp_path.iterdir()), signer, "agt_Q.7")
@@ -738,7 +867,7 @@ async def test_revocation_from_another_process_stops_a_blocked_subtree(tmp_path)
     def park_builder(token):
         async def park() -> str:
             """Block until cancelled."""
-            parked["a1" if token.id.endswith(".1.1") else "a"].set()
+            parked["a1" if token.depth == 2 else "a"].set()
             await asyncio.sleep(30)
             return "woke"
 
@@ -777,7 +906,7 @@ async def test_revocation_from_another_process_stops_a_blocked_subtree(tmp_path)
         always_take_turns=True,
         limits=Limits(max_rounds=6),
     )
-    mapping = _letters([t.id for t in outcome.roots])
+    mapping = _labels(_ledger_in(outcome.run_dir))
     calls[:] = [tuple(c) for c in _translate(calls, mapping)]
     outcome = dataclasses.replace(outcome, agents={k: tuple(v) for k, v in _translate(outcome.agents, mapping).items()})
     result = verified(outcome, trusted)
@@ -816,10 +945,12 @@ async def test_every_call_traces_to_a_root_in_the_ledger(tmp_path, signer):
     outcome = await run(tmp_path, signer, tree_scripts(), limits=Limits(max_rounds=6))
     result = verified(outcome, signer)
     created = edges(result)
+    lineage = Lineage.from_ledger(result.ledger)
+    roots = {e["child"] for e in result.ledger if e["type"] == "root"}
     for entry in result.calls:
         if entry["agent_id"] != HARNESS:
             assert entry["agent_id"] in created
-            assert root_of(entry["agent_id"]) in created
+            assert lineage.root(entry["agent_id"]) in roots
 
 
 def test_cli_entry_point_exists():

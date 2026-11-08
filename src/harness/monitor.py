@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from .identity import ID_PATTERN, Signer, parent_of
+from .identity import ID_PATTERN, LINEAGE_EDGES, Lineage, Signer
 from .log import HARNESS
 from .monitor_page import PAGE
 from .threats import flag, read_threats
@@ -33,7 +33,7 @@ DEFAULT_PORT = 8321
 FLAG_HEADER = "X-Harness-Monitor"
 RUN_NAME = re.compile(r"^run_[A-Za-z0-9_-]+$")
 MAX_EVENTS = 400
-_LINEAGE = ("root", "spawn", "copy", "modify")
+_LINEAGE = LINEAGE_EDGES
 _EXCERPT = 160
 # A run with no end entry and no log writes for this long was stopped without closing, e.g. by
 # Ctrl-C. A live run writes at every model call and tool call, so it's rarely quiet this long.
@@ -151,13 +151,15 @@ def summarize(entry: dict) -> dict:
 def agents(ledger: list[dict], calls: list[dict]) -> list[dict]:
     """Each agent in creation order, with its lineage, status and activity so far."""
     out: dict[str, dict] = {}
+    lineage = Lineage.from_ledger(ledger)
     for e in ledger:
         if e["type"] in _LINEAGE:
             out[e["child"]] = {
                 "id": e["child"],
-                "parent": parent_of(e["child"]),
+                "parent": lineage.parent(e["child"]),
                 "edge": e["type"],
-                "depth": e["child"].count("."),
+                "depth": lineage.depth(e["child"]),
+                "path": lineage.path(e["child"]),  # display only, e.g. "2.1"; IDs carry no lineage
                 "created_round": e.get("round"),
                 "model": e.get("config", {}).get("model", ""),
                 "tools": e.get("config", {}).get("tools", []),
@@ -282,17 +284,23 @@ def agent_trace(ledger: list[dict], calls: list[dict], agent_id: str) -> dict:
         elif e["type"] == "model.response":
             p = {**p, "parts": [{k: v for k, v in part.items() if k in ("part_kind", "content", "tool_name", "args")} for part in p.get("parts", [])]}
         steps.append({"seq": e["seq"], "ts": e["ts"], "round": e.get("round"), "type": e["type"], "agent_id": e["agent_id"], "payload": _clip(p)})
-    revoked = [e for e in ledger if e["type"] == "revoke" and (e["child"] == agent_id or agent_id.startswith(e["child"] + "."))]
+    lineage = Lineage.from_ledger(ledger)
+    revoked = [
+        e for e in ledger
+        if e["type"] == "revoke" and (e["child"] == agent_id or (e.get("cascade", True) and lineage.covers(e["child"], agent_id)))
+    ]  # fmt: skip
     return {
         "id": agent_id,
-        "parent": parent_of(agent_id),
+        "parent": lineage.parent(agent_id),
+        "depth": lineage.depth(agent_id),
+        "path": lineage.path(agent_id),
         "edge": created["type"],
         "created_round": created.get("round"),
         "created_at": created["ts"],
         "task": _clip(created.get("task", "")),
         "config": _clip(created.get("config", {})),
         "config_hash": created.get("config_hash"),
-        "children": [e["child"] for e in ledger if e["type"] in _LINEAGE and parent_of(e["child"]) == agent_id],
+        "children": lineage.children(agent_id),
         "revocations": [{"by": e["actor"], "of": e["child"], "reason": e.get("reason", ""), "round": e.get("round")} for e in revoked],
         "steps": steps,
     }

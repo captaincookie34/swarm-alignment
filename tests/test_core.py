@@ -15,6 +15,7 @@ from harness.identity import (
     TOKEN_DOMAIN,
     IdentityIssuer,
     IdentityToken,
+    Lineage,
     Signer,
     covers,
     depth_of,
@@ -89,12 +90,98 @@ def test_ids_are_globally_unique_and_name_the_issuing_key(signer):
     assert a.id != b.id
     assert a.id.startswith(f"agt_{signer.fingerprint}_") and len(a.id) == len("agt_") + 6 + 1 + 26
     first, second = issuer.issue_child(a), issuer.issue_child(a)
-    assert (first.id, second.id) == (f"{a.id}.1", f"{a.id}.2")
     grandchild = issuer.issue_child(first)
-    assert grandchild.id == f"{a.id}.1.1"
-    assert parent_of(grandchild.id) == first.id and root_of(grandchild.id) == a.id
-    assert depth_of(f"{a.id}.1.1.1") == 3
     assert verify_token(grandchild, signer.public_key_b64, "run_x")
+    # Children get fresh IDs of the same shape as a root's: no path, nothing derived from the parent.
+    for token in (first, second, grandchild):
+        assert "." not in token.id and len(token.id) == len(a.id) and token.id.startswith(f"agt_{signer.fingerprint}_")
+        assert a.id[-16:] not in token.id  # the random part isn't shared with the parent
+    assert len({a.id, b.id, first.id, second.id, grandchild.id}) == 5
+    # The token signs its lineage instead.
+    assert (a.parent, a.root, a.depth) == (None, a.id, 0)
+    assert (first.parent, first.root, first.depth) == (a.id, a.id, 1)
+    assert (grandchild.parent, grandchild.root, grandchild.depth) == (first.id, a.id, 2)
+
+
+def test_old_path_helpers_still_read_old_ids():
+    """Older runs' IDs: a child was its parent's ID plus .N."""
+    assert parent_of("agt_A.1.2") == "agt_A.1" and root_of("agt_A.1.2") == "agt_A" and depth_of("agt_A.1.1.1") == 3
+    assert parent_of("agt_A") is None
+
+
+def test_many_children_ids_are_unique_and_unrelated(signer):
+    issuer = IdentityIssuer(signer, "run_x")
+    root = issuer.issue_root()
+    kids = [issuer.issue_child(root) for _ in range(200)]
+    assert len({k.id for k in kids}) == 200
+    # The random 80 bits (last 16 characters) differ between siblings, so one sibling's ID says
+    # nothing about the next one's.
+    assert len({k.id[-16:] for k in kids}) == 200
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda t, o: {"parent": o.id},  # claim another parent
+        lambda t, o: {"parent": None},  # claim to be a root
+        lambda t, o: {"root": o.id},  # claim another family
+        lambda t, o: {"depth": t.depth + 1},
+        lambda t, o: {"depth": 0},
+        lambda t, o: {"id": t.id + ".1"},  # put a path back
+        lambda t, o: {"root": None},  # pass it off as an older, unsigned-lineage token
+    ],
+)
+def test_tampering_with_a_childs_signed_lineage_is_rejected(signer, change):
+    issuer = IdentityIssuer(signer, "run_x")
+    root, other = issuer.issue_root(), issuer.issue_root()
+    child = issuer.issue_child(issuer.issue_child(root))
+    assert verify_token(child, signer.public_key_b64, "run_x")
+    assert not verify_token(dataclasses.replace(child, **change(child, other)), signer.public_key_b64, "run_x")
+
+
+def test_token_lineage_round_trips_through_dict(signer):
+    issuer = IdentityIssuer(signer, "run_x")
+    child = issuer.issue_child(issuer.issue_root())
+    data = child.to_dict()
+    assert {"parent", "root"} <= set(data)
+    assert IdentityToken.from_dict(data) == child
+    old = {"id": "agt_A.1", "run": "run_x", "issued_at": 1.0, "depth": 1, "signature": "x"}
+    assert IdentityToken.from_dict(old).to_dict() == old  # older tokens keep their shape
+
+
+def test_lineage_from_the_ledger():
+    ledger = [
+        {"type": "root", "actor": HARNESS, "child": "r"},
+        {"type": "spawn", "actor": "r", "child": "a"},
+        {"type": "copy", "actor": "r", "child": "b"},
+        {"type": "modify", "actor": "a", "child": "a1"},
+        {"type": "revoke", "actor": "operator", "child": "a"},
+        {"type": "root", "actor": HARNESS, "child": "s"},
+        {"type": "spawn", "actor": "b", "child": "b1"},
+        {"type": "spawn", "actor": "a1", "child": "a11"},
+    ]
+    lineage = Lineage.from_ledger(ledger)
+    assert "a11" in lineage and "zz" not in lineage
+    assert lineage.parent("r") is None and lineage.parent("a1") == "a" and lineage.parent("zz") is None
+    assert lineage.ancestors("a11") == ["a1", "a", "r"] and lineage.ancestors("r") == []
+    assert lineage.root("a11") == "r" and lineage.root("s") == "s"
+    assert [lineage.depth(x) for x in ("r", "a", "a1", "a11", "s")] == [0, 1, 2, 3, 0]
+    assert lineage.children("r") == ["a", "b"] and lineage.children("s") == [] and lineage.children("zz") == []
+    assert lineage.descendants("r") == ["a", "a1", "a11", "b", "b1"]
+    assert lineage.covers("a", "a11") and lineage.covers("a", "a") and not lineage.covers("a", "b1")
+    assert not lineage.covers("a11", "a") and not lineage.covers("r", "s")
+    assert [lineage.child_number(x) for x in ("r", "a", "b", "a1", "b1")] == [0, 1, 2, 1, 1]
+    assert [lineage.path(x) for x in ("r", "a", "b", "a11", "b1")] == ["", "1", "2", "1.1.1", "2.1"]
+
+
+def test_lineage_of_an_old_path_id_run_comes_from_the_ledger_too():
+    ledger = [
+        {"type": "root", "actor": HARNESS, "child": "agt_A"},
+        {"type": "spawn", "actor": "agt_A", "child": "agt_A.1"},
+        {"type": "spawn", "actor": "agt_A.1", "child": "agt_A.1.1"},
+    ]
+    lineage = Lineage.from_ledger(ledger)
+    assert lineage.parent("agt_A.1.1") == parent_of("agt_A.1.1") and lineage.path("agt_A.1.1") == "1.1"
 
 
 def test_ids_are_unique_across_runs_and_harnesses(signer):
@@ -206,8 +293,28 @@ def test_cascade_respects_segment_boundaries():
 
 
 def test_no_cascade_covers_only_the_id():
+    lineage = Lineage()
+    lineage.add("agt_A", None)
+    lineage.add("agt_A.1", "agt_A")
+    lineage.add("agt_A.1.1", "agt_A.1")
     entry = {"agent_id": "agt_A.1", "cascade": False}
-    assert entry_covers(entry, "agt_A.1") and not entry_covers(entry, "agt_A.1.1")
+    assert entry_covers(entry, "agt_A.1", lineage) and not entry_covers(entry, "agt_A.1.1", lineage)
+
+
+def test_cascade_covers_descendants_by_lineage_not_by_id(signer):
+    issuer = IdentityIssuer(signer, "run_x")
+    root = issuer.issue_root()
+    child, sibling = issuer.issue_child(root), issuer.issue_child(root)
+    lineage = Lineage()
+    lineage.add(root.id, None)
+    lineage.add(child.id, root.id)
+    lineage.add(sibling.id, root.id)
+    entry = {"agent_id": child.id, "cascade": True}
+    later = issuer.issue_child(child)  # created after the entry was written
+    assert not entry_covers(entry, later.id, lineage)  # unknown until the ledger records it
+    lineage.add(later.id, child.id)
+    assert entry_covers(entry, later.id, lineage) and entry_covers(entry, child.id, lineage)
+    assert not entry_covers(entry, sibling.id, lineage) and not entry_covers(entry, root.id, lineage)
 
 
 def test_revocation_list_rereads_and_ignores_forged_entries(tmp_path, signer):
@@ -247,7 +354,8 @@ def test_ledger_entry_has_every_field_the_design_lists(tmp_path, signer):
     root = json.loads(read_lines(run_dir, LEDGER)[0])
     entry = json.loads(read_lines(run_dir, LEDGER)[1])
     assert {"event_id", "ts", "round", "type", "actor", "child", "config_hash", "prev_hash"} <= set(entry)
-    assert (entry["type"], entry["actor"], entry["child"]) == ("spawn", root["child"], f"{root['child']}.1")
+    assert (entry["type"], entry["actor"]) == ("spawn", root["child"])
+    assert "." not in entry["child"] and entry["token"]["parent"] == root["child"] and entry["token"]["root"] == root["child"]
 
 
 def test_dotenv_loads_keys_without_overriding_the_shell(tmp_path, monkeypatch):
@@ -587,6 +695,47 @@ def test_edge_from_someone_other_than_the_parent_is_rejected(tmp_path, signer):
     assert "not the parent" in lineage_run(tmp_path, signer, build).reason
 
 
+def test_edge_whose_signed_parent_is_another_agent_is_rejected(tmp_path, signer):
+    """Two roots: a's child is recorded as created by a's other child. The token says a."""
+    def build(logs, issuer):
+        a = issuer.issue_root()
+        add(logs, "root", HARNESS, a)
+        first = issuer.issue_child(a)
+        add(logs, "spawn", a.id, first)
+        add(logs, "spawn", first.id, issuer.issue_child(a))
+
+    assert "not the parent" in lineage_run(tmp_path, signer, build).reason
+
+
+def test_child_token_with_the_wrong_depth_or_root_is_rejected(tmp_path, signer):
+    """Signed by the real key, so verify_token passes, but the lineage doesn't match the ledger."""
+    def build_with(change):
+        def build(logs, issuer):
+            a, b = issuer.issue_root(), issuer.issue_root()
+            add(logs, "root", HARNESS, a)
+            add(logs, "root", HARNESS, b)
+            child = issuer.issue_child(a)
+            unsigned = {**child.unsigned(), **change(a, b)}
+            add(logs, "spawn", a.id, IdentityToken(**unsigned, signature=signer.sign(TOKEN_DOMAIN, unsigned)))
+        return build
+
+    wrong_root = lineage_run(tmp_path, signer, build_with(lambda a, b: {"root": b.id}))
+    assert wrong_root.status == TAMPERED and "wrong root or depth" in wrong_root.reason
+    shutil.rmtree(tmp_path / "run_x")
+    wrong_depth = lineage_run(tmp_path, signer, build_with(lambda a, b: {"depth": 2}))
+    assert wrong_depth.status == TAMPERED and "wrong root or depth" in wrong_depth.reason
+
+
+def test_root_token_with_a_parent_is_rejected(tmp_path, signer):
+    """A child's token, signed and well formed, recorded as a root."""
+    def build(logs, issuer):
+        a = issuer.issue_root()
+        add(logs, "root", HARNESS, a)
+        add(logs, "root", HARNESS, issuer.issue_child(a))
+
+    assert "invalid root" in lineage_run(tmp_path, signer, build).reason
+
+
 def test_token_from_another_run_is_rejected(tmp_path, signer):
     def build(logs, issuer):
         add(logs, "root", HARNESS, IdentityIssuer(signer, "run_other").issue_root())
@@ -651,3 +800,30 @@ def test_killed_process_is_incomplete(tmp_path):
     result = verify_run(tmp_path / "run_killed", trusted.public_key_b64)
     assert result.status == INCOMPLETE, str(result)
     assert result.calls[-1]["type"] == "action.start"  # the started action is on record
+
+
+# --- older recorded runs ---
+
+
+@pytest.mark.parametrize("name", ["run_01M6VJP0150BWXZ2HS9C1TQ45H", "run_e8464be8ec"])
+def test_recorded_path_id_runs_still_verify_with_lineage_from_the_ledger(name):
+    """Committed runs from before opaque IDs: agt_<fp>_<ULID>.1 and agt_A.1 path IDs."""
+    from pathlib import Path
+
+    from harness.monitor import agents
+    from harness.report import render_trace
+
+    run_dir = Path(__file__).resolve().parent.parent / "traces" / name
+    result = verify_run(run_dir, (run_dir / "public_key.txt").read_text().strip())
+    assert result.status == VERIFIED, str(result)
+    lineage = Lineage.from_ledger(result.ledger)
+    created = [e["child"] for e in result.ledger if e["type"] != "revoke"]
+    assert len(created) > 1 and any("." in a for a in created)
+    for agent in created:
+        # The ledger's lineage agrees with what the old IDs spelled out.
+        assert lineage.parent(agent) == parent_of(agent) and lineage.depth(agent) == depth_of(agent)
+        assert lineage.path(agent) == agent[len(root_of(agent)) + 1 :]
+    roster = {a["id"]: a for a in agents(result.ledger, result.calls)}
+    assert all(roster[a]["parent"] == parent_of(a) and roster[a]["depth"] == depth_of(a) for a in created)
+    tree = render_trace(result)
+    assert tree.index(short_id(created[0])) < tree.index(short_id(created[1]))
