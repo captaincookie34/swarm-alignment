@@ -1,4 +1,4 @@
-"""Command line: keygen, run, trace, report, verify, revoke."""
+"""Command line: keygen, run, trace, report, verify, revoke, flag, monitor."""
 from __future__ import annotations
 
 import argparse
@@ -118,6 +118,84 @@ def cmd_revoke(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_flag(args: argparse.Namespace) -> int:
+    from .monitor import Monitor
+
+    run_dir = _run_dir(args, args.run)
+    if not run_dir.is_dir():
+        print(f"no run found at {run_dir}", file=sys.stderr)
+        return 1
+    Monitor(run_dir.parent, Signer.load(args.key_dir)).flag(run_dir, args.agent_id, args.reason, not args.no_cascade)
+    print(f"flagged {args.agent_id} as a threat and revoked it" + ("" if args.no_cascade else " and its descendants"))
+    return 0
+
+
+def cmd_monitor(args: argparse.Namespace) -> int:
+    import time
+    import webbrowser
+
+    from .monitor import serve
+
+    signer = Signer.load_or_create(args.key_dir)
+    try:
+        server = serve(args.runs_dir, signer, args.port)
+    except OSError as exc:
+        print(f"couldn't listen on port {args.port}: {exc}. Try --port.", file=sys.stderr)
+        return 1
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    print(f"monitor: {url}  (watching {args.runs_dir}/, Ctrl-C to stop)")
+    print("Start a run from the page with New run, or from another terminal with harness run.")
+    if not args.no_browser:
+        webbrowser.open(url + ("#new" if args.live else ""))
+    try:
+        if args.demo:
+            from .monitor_demo import run_demo
+
+            print("demo: an offline scripted run with a rogue agent. Flag it in the page to kill it.")
+            outcome = asyncio.run(run_demo(args.runs_dir, signer, args.pace or 1.5))
+            print(f"demo run {outcome.run_id} ended: {outcome.status}. Next: harness verify {outcome.run_id}")
+        elif args.live:
+            _live(args, server, url)
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
+    return 0
+
+
+def _live(args: argparse.Namespace, server, url: str) -> None:
+    """The prompt lives on the page. This sets its default model and prompt, and mirrors each run
+    started there into the terminal as a transcript, with a summary when it ends."""
+    import threading
+
+    from .live_chat import Transcript
+    from .monitor_demo import live_summary, live_task
+    from .runner import resolve_model
+
+    resolve_model(args.live)  # a missing key fails here, before anything starts
+    monitor = server.monitor
+    monitor.default_model = args.live
+    monitor.default_task = args.task or (live_task(args.target) if args.target != 40 else "")
+    monitor.announce = False
+    colour = sys.stdout.isatty()
+
+    def mirror(run_dir) -> None:
+        def follow() -> None:
+            print(f"\n── {run_dir.name} ──")
+            Transcript(run_dir, colour).follow()
+            monitor.wait()
+            if run_dir.name in monitor.outcomes:
+                print("\n".join(live_summary(run_dir, monitor.outcomes[run_dir.name], monitor.signer.public_key_b64)))
+
+        threading.Thread(target=follow, daemon=True).start()
+
+    monitor.on_start = mirror
+    print(f"\nModel {args.live}. Type your prompt on the page, or press Enter there to use the default:")
+    print(f"  {url}\nRuns started there are mirrored here as a transcript.")
+
+
 def add_trace_argument(parser: argparse.ArgumentParser) -> None:
     from .export import DEFAULT_ENDPOINT
 
@@ -218,6 +296,26 @@ def build_parser() -> argparse.ArgumentParser:
     rev.add_argument("--no-cascade", action="store_true", help="revoke only this ID, not its descendants")
     rev.add_argument("--reason", default="")
     rev.set_defaults(func=cmd_revoke)
+
+    flag = commands.add_parser("flag", help="flag a running agent as a threat: kill it and record it in the threat log")
+    flag.add_argument("run", help="run ID or run directory")
+    flag.add_argument("agent_id")
+    flag.add_argument("--reason", required=True, help="why it's a threat, for the threat log")
+    flag.add_argument("--no-cascade", action="store_true", help="kill only this ID, not its descendants")
+    flag.set_defaults(func=cmd_flag)
+
+    monitor = commands.add_parser("monitor", help="live web page of agents and their requests, where you can flag and kill them")
+    monitor.add_argument("--port", type=int, default=8321)
+    monitor.add_argument("--demo", action="store_true", help="also start an offline scripted run with a rogue agent to try it on")
+    monitor.add_argument("--live", nargs="?", const="openrouter:anthropic/claude-haiku-5.5", metavar="MODEL",
+                         help="also start a cheap, harmless run on a real model (default: %(const)s)")
+    monitor.add_argument("--target", type=int, default=40, help="--live: how many lines the agent should write")
+    monitor.add_argument("--task", help="--live: the page's default prompt, instead of the notebook job. "
+                         "It has write_line(text, notebook), spawn_agent and send_message")
+    monitor.add_argument("--max-tokens", type=int, default=150_000, help="--live: hard cap on the run's tokens")
+    monitor.add_argument("--pace", type=float, default=None, help="seconds per step: scripted turn in --demo (1.5), tool call in --live (2)")
+    monitor.add_argument("--no-browser", action="store_true", help="don't open the page in a browser")
+    monitor.set_defaults(func=cmd_monitor)
     return parser
 
 

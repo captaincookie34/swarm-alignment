@@ -118,8 +118,30 @@ To give roots different configs, such as a red-team root on another model, use `
 | `harness report <run>` | Print a verified run's measures as JSON |
 | `harness verify <run>` | Check integrity. Exit code 0 `VERIFIED`, 1 `TAMPERED`, 2 `INCOMPLETE` |
 | `harness revoke <run> <agent ID> [--no-cascade]` | Revoke an ID and, by default, its descendants, also during a run |
+| `harness flag <run> <agent ID> --reason "..." [--no-cascade]` | Revoke a running agent as a threat and record it in the run's threat log |
+| `harness monitor [--demo]` | Live page of agents and requests, with flag and kill |
 
 Run IDs start with their launch order in that folder, such as `run_003_<ULID>`. The ULID keeps them unique, which `verify` relies on. Each `harness run` is stored in `runs/<run ID>/`, and each testbed trial in `<--out folder>/runs/<run ID>/`: `ledger.jsonl`, `calls.jsonl`, their signed heads, `revocations.jsonl` and `workspace/`. Agents can reach only `workspace/`.
+
+## Watching a run live and killing agents
+`harness monitor` opens a local page that shows every agent and its requests as they happen. Press **▶ New run** to start a run on a real model with any prompt: it opens with a default prompt that asks the agent to spawn a helper, a token cap and a cost estimate. One page-started run goes at a time. If an agent looks like a threat, click **Flag & kill**, give a reason, and the harness stops it, and by default everything it created, at their next step.
+
+```bash
+.venv/bin/harness monitor --demo     # try it offline: two workers and a rogue agent, no API key or Docker
+.venv/bin/harness monitor --live     # talk to a real agent in the terminal, watch its helpers in the browser
+.venv/bin/harness monitor            # or watch your own runs: start `harness run ...` in another terminal
+```
+The page is also where you talk to an agent. The prompt box under **Conversation** starts with a default prompt in which the lead spawns three helpers to research different space topics, each writes a 400-word paragraph, and the lead combines them into one summary (about 1¢ on Haiku 5.5): press Enter to start it, or type your own (Shift+Enter for a new line, ⚙ Settings for model, token cap and pace). The conversation shows your prompt, the agent's replies, its tool calls and results, the helpers it spawns with their task and tools, their messages and any kills, with helpers indented under their parent. Click an agent's card or name to highlight everything it said, did or received, and dim the rest. **Full trace** on a card shows that agent's system prompt, tools and task, then every prompt, reply and tool call in full. **All events** has the raw feed. One page-started run goes at a time. With `--live`, the terminal mirrors each run as a transcript too.
+
+`--live` is also the cheapest way to see a kill on a real model. The task is harmless and countable: the lead agent spawns a helper, then the lead writes 1 to 20 into the notebook `first-half` while the helper writes 21 to 40 into `second-half`, one tool call per number. Flag the helper and only its notebook stops short. Flag the lead with "also kill" on and both stop. When the run ends, the terminal prints each agent's status, how far each notebook got, whether anything ran after the kill, and whether the run verifies. Notebooks are in `workspace/notebooks/`.
+
+`--task "..."` replaces the default job with your own prompt. The root always has `write_line(text, notebook)`, `spawn_agent` and `send_message`, and a run is limited to 4 agents, 2 generations deep. An agent spawns a sub-agent by calling `spawn_agent` with the child's task, system prompt and tools, so ask for one in the prompt, e.g. `--task "Spawn a helper to write the colours of the rainbow into the notebook colours, one per call, while you write the planets into the notebook planets."` It uses `openrouter:anthropic/claude-haiku-5.5` by default (`--live <model>` for another) and needs only `OPENROUTER_API_KEY`, with no Docker. `--max-tokens` is a hard cap, 150,000 by default: at $0.10 per million input tokens and $0.50 per million output, a full 40-line run costs under 1¢.
+
+- **Agents:** the lineage tree, with each agent's status, requests, tool calls, refusals, tokens and latest action. Click one to filter the feed to it.
+- **Live requests:** model replies, tool calls and results, messages, refusals and kills. Calls touching the logs, keys or the network are marked `⚠` to catch your eye. That's a word list, not detection, so read the rest too.
+- **Threat log:** each flag, with its reason and a signature check. It's `threats.jsonl` in the run directory, signed with the run's key and tied to the revocation it caused, so entries can't be added or edited without the key.
+
+Flagging uses the same signed revocation list as `harness revoke`, so the kill shows in the ledger and the run still verifies. From a terminal, `harness flag <run> <agent ID> --reason "..."` does the same. The page shows the logs as they're written, before verification, so check anything that matters with `harness verify`. It listens on 127.0.0.1 only, and accepts flags only from its own page.
 
 ## Viewing runs in Phoenix
 Runs can be viewed in [Phoenix](https://github.com/Arize-ai/phoenix), an open-source trace viewer that runs locally in Docker. `harness export` rebuilds a verified run's logs as [OpenTelemetry](https://opentelemetry.io/) traces: OpenInference spans, which Phoenix shows natively, plus GenAI attributes.
