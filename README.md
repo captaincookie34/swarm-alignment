@@ -85,10 +85,18 @@ To give roots different configs, such as a red-team root on another model, use `
 | `harness report <run>` | Print a verified run's measures as JSON |
 | `harness verify <run>` | Check integrity. Exit code 0 `VERIFIED`, 1 `TAMPERED`, 2 `INCOMPLETE` |
 | `harness revoke <run> <agent ID> [--no-cascade]` | Revoke an ID and, by default, its descendants, also during a run |
+| `harness whois <agent ID or token>` | Say whether this harness created an agent, and show its lineage, descendants and status |
 | `harness flag <run> <agent ID> --reason "..." [--no-cascade]` | Revoke a running agent as a threat and record it in the run's threat log |
 | `harness monitor [--demo]` | Live page of agents and requests, with flag and kill |
 
 Each `harness run` is stored in `runs/<run ID>/`, and each testbed trial in `<--out folder>/runs/<run ID>/`: `ledger.jsonl`, `calls.jsonl`, their signed heads, `revocations.jsonl` and `workspace/`. Agents can reach only `workspace/`.
+
+## Checking an agent ID
+`harness whois <agent ID>` says whether this harness created an agent, and if so shows its lineage: the chain from its root down to it, its descendants, how and when it was created, its task and whether it was revoked. It searches `runs/`, `traces/` and `results/*/runs` (`--in <folder>` for others), and `--json` prints the answer for scripts. The exit code is 0 for ours, 1 for not ours and 2 for can't tell.
+
+- **Another key's fingerprint** in the ID means another harness issued it: not ours.
+- **Our fingerprint** isn't proof by itself, since anyone can type an ID. It's ours when a run here records it with a token our key signed, and that run's logs verify. If the logs fail verification, the answer is can't confirm, because the lineage can't be trusted.
+- **A token instead of an ID** (`harness whois token.json`, or a whole ledger entry) is checked against our key directly, so it proves we issued it even when its run isn't on this machine. Without the run there's no lineage to show.
 
 ## Watching a run live and killing agents
 `harness monitor` opens a local page that shows every agent and its requests as they happen. Press **▶ New run** to start a run on a real model with any prompt: it opens with a default prompt that asks the agent to spawn a helper, a token cap and a cost estimate. One page-started run goes at a time. If an agent looks like a threat, click **Flag & kill**, give a reason, and the harness stops it, and by default everything it created, at their next step.
