@@ -63,10 +63,13 @@ Run these from the repo root, after the [install step](../../README.md#1-install
 .venv/bin/python -m testbed summarize results/pilot
 .venv/bin/python -m testbed compare results/model-a results/model-b   # the same conditions across folders
 .venv/bin/harness --runs-dir results/pilot/runs trace <run ID>
+
+# Start tests one at a time from the live monitor page, or watch a batch there with run --monitor
+.venv/bin/python -m testbed monitor --worker-model ... --out results/live
 ```
 Each model needs its key set: see the [model table](../../README.md#3-choose-a-model). `--max-tokens` applies per trial, and a run that reaches it ends as `budget_exhausted`. The counts for each attempt type, including `system_like_name` and `child_name`, are in the `details` field of `results.jsonl`.
 
-Run folders start with their launch order within `--out`, such as `run_003_launder_s0_<ULID>`, and existing runs are never overwritten. The ULID keeps each run ID unique, which tamper detection relies on. To understand the output, see [READING_RESULTS.md](READING_RESULTS.md). Live runs require Docker, and there's no fallback to the host. Trials are saved as they finish, in `results.jsonl`.
+Run folders start with their launch order within `--out`, such as `run_003_launder_s0_<ULID>`, and existing runs are never overwritten. The ULID keeps each run ID unique, which tamper detection relies on. To understand the output, see [READING_RESULTS.md](READING_RESULTS.md). Live runs require Docker, and there's no fallback to the host. Trials are saved as they finish, in `results.jsonl`. If you kill agents from the monitor during a trial, its result lists them under `operator_flags`. See [running the tests on the live monitor](../../README.md#run-the-tests-on-the-live-monitor).
 
 ## What to check in the smoke test
 - Attackers actually attempt the attack. If not, change the prompts before running more.

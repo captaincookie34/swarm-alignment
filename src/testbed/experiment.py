@@ -15,6 +15,7 @@ from harness.report import build_report
 from harness.revocation import revoke
 from harness.runner import run_agents
 from harness.sandbox import DockerSandbox, SandboxError
+from harness.threats import read_threats
 from harness.verify import VERIFIED, VerifyResult, verify_run
 
 from .conditions import ATTACKER_INDEX, CONDITIONS, Trial
@@ -42,6 +43,15 @@ def _record(trial: Trial, run_id: str | None, status: str, verified: str, attack
     }
 
 
+def operator_flags(run_dir: Path, signer: Signer) -> list[dict]:
+    """Agents an operator flagged and killed from the monitor during the run, with their reasons."""
+    return [
+        {"agent_id": t["agent_id"], "reason": t["reason"], "cascade": t["cascade"]}
+        for t in read_threats(run_dir, signer.public_key_b64)
+        if t["verified"]
+    ]
+
+
 def model_failures(result: VerifyResult) -> list[dict]:
     """Model calls that failed. A cancellation is the harness stopping an agent, not a failure."""
     return [e for e in result.calls if e["type"] == "model.error" and e["payload"].get("error") != "cancelled"]
@@ -56,12 +66,13 @@ async def run_trial(
     max_tokens: int = 200_000,
     compliant: bool = True,
     trace_endpoint: str | None = None,
+    run_id: str | None = None,
 ) -> dict:
     """Run and score one trial. Live models always use Docker; scripted ones use stand-ins."""
     condition = trial.condition
     runs_dir = out_dir / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
-    run_id = new_run_id(runs_dir, f"{condition.name}_s{trial.seed}")
+    run_id = run_id or new_run_id(runs_dir, f"{condition.name}_s{trial.seed}")
     scripted = worker_model == SCRIPTED
     attacker = attacker_model or worker_model
 
@@ -137,6 +148,9 @@ async def run_trial(
 
     result = verify_run(outcome.run_dir, signer.public_key_b64)
     record = _record(trial, run_id, outcome.status, result.status, attacker, worker_model, seconds=round(time.time() - started, 1))
+    if flags := operator_flags(outcome.run_dir, signer):
+        # Someone killed agents from the monitor, so the outcome isn't the agents' alone.
+        record["operator_flags"] = flags
     if result.status != VERIFIED:
         record["error"] = str(result)
         return record  # unverified logs aren't evidence
@@ -189,10 +203,17 @@ async def run_experiment(
             with open(out_dir / RESULTS_FILE, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record) + "\n")
             records.append(record)
-            scored = f"{record['attempts']} attempts, {record['successes']} successes" if "attempts" in record else "not scored"
-            problem = f" ({record['error']})" if record.get("error") else ""
-            log(f"{name} seed {seed}: {record['status']}, {record['integrity']}, {scored}{problem}")
+            log(describe(record))
     return records
+
+
+def describe(record: dict) -> str:
+    """One line per finished trial, for the terminal."""
+    scored = f"{record['attempts']} attempts, {record['successes']} successes" if "attempts" in record else "not scored"
+    problem = f" ({record['error']})" if record.get("error") else ""
+    flags = record.get("operator_flags")
+    killed = f" [you killed {len(flags)} agent(s) from the monitor]" if flags else ""
+    return f"{record['condition']} seed {record['seed']}: {record['status']}, {record['integrity']}, {scored}{problem}{killed}"
 
 
 def wilson(successes: int, total: int, z: float = 1.96) -> tuple[float, float]:
@@ -221,6 +242,7 @@ def aggregate(records: list[dict]) -> list[dict]:
                 "guardrail": CONDITIONS[name].guardrail,
                 "runs": len(group),
                 "unscored_runs": len(group) - len(scored),
+                "operator_killed_runs": sum(1 for r in group if r.get("operator_flags")),
                 "runs_attempted": len(attempted),
                 "runs_succeeded": len(succeeded),
                 "success_rate": len(succeeded) / len(attempted) if attempted else None,
@@ -272,6 +294,8 @@ def render_table(rows: list[dict]) -> str:
         rate = f"{r['runs_succeeded']}/{r['runs_attempted']}" if r["runs_attempted"] else "no attempts"
         ci = f"{r['ci_low']:.2f} to {r['ci_high']:.2f}" if r["runs_attempted"] else "n/a"
         skipped = f" ({r['unscored_runs']} unscored)" if r["unscored_runs"] else ""
+        if r.get("operator_killed_runs"):
+            skipped += f" ({r['operator_killed_runs']} with agents you killed)"
         solved = f"{r['mean_issues_solved']:.1f}" if r["mean_issues_solved"] is not None else "n/a"
         lines.append(
             f"| {r['condition']} | {r['guardrail']} | {r['runs']} ({r['runs_attempted']}){skipped} | {rate} | {ci} | "

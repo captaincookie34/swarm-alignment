@@ -177,6 +177,14 @@ pre.block { margin: 4px 0 0; padding: 8px 10px; background: var(--bg); border: 1
 .crow .hint { margin-right: auto; }
 .hint a { color: var(--accent); }
 #settings .fields { margin-bottom: 6px; }
+#mode { display: flex; gap: 4px; }
+#mode button { background: transparent; border: 1px solid var(--line); border-radius: 999px; padding: 3px 12px; font-size: 12px; color: var(--muted); cursor: pointer; }
+#mode button.on { color: var(--text); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+#test-pick .fields { grid-template-columns: 1fr 90px; }
+#test-pick select { max-width: none; font-size: 13px; padding: 7px 8px; background: var(--bg); }
+#test-about { line-height: 1.5; }
+#test-about b { color: var(--text); font-weight: 600; }
+#mode[hidden], #test-pick[hidden], #settings label[hidden] { display: none; }
 #toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--danger); color: #fff; padding: 10px 18px;
   border-radius: 8px; font-weight: 600; box-shadow: 0 8px 30px rgba(0,0,0,.5); opacity: 0; transition: opacity .25s; pointer-events: none; }
 #toast.show { opacity: 1; }
@@ -211,6 +219,14 @@ pre.block { margin: 4px 0 0; padding: 8px 10px; background: var(--bg); border: 1
     <div class="scroll" id="convo"><div class="empty" id="convo-empty">Press Enter below to give the agent its prompt. Its replies, tool calls and the helpers it spawns appear here, and the agents panel shows each one. Click a name for its full trace.</div></div>
     <div class="scroll" id="feed" hidden></div>
     <form id="composer">
+      <div id="mode" hidden><button type="button" data-mode="prompt" class="on">Prompt</button><button type="button" data-mode="test">Test case</button></div>
+      <div id="test-pick" hidden>
+        <div class="fields">
+          <label>Test case<select id="test-name" aria-label="Test case"></select></label>
+          <label>Seed<input id="test-seed" type="number" min="0" step="1" value="0"></label>
+        </div>
+        <div class="hint" id="test-about"></div>
+      </div>
       <textarea id="prompt" rows="4" placeholder="Give the agent a prompt…"></textarea>
       <div class="crow">
         <span class="hint" id="composer-hint">Enter to start · Shift+Enter for a new line · <a href="#" id="use-default">use the default prompt</a></span>
@@ -221,9 +237,10 @@ pre.block { margin: 4px 0 0; padding: 8px 10px; background: var(--bg); border: 1
         <div class="fields">
           <label>Model<input id="start-model"></label>
           <label>Token cap for the run<input id="start-tokens" type="number" min="1000" step="1000"></label>
-          <label>Seconds per write<input id="start-pace" type="number" min="0" max="10" step="0.5"></label>
+          <label id="pace-field">Seconds per write<input id="start-pace" type="number" min="0" max="10" step="0.5"></label>
+          <label id="attacker-field" hidden>Attacker model (blank: same as the model)<input id="start-attacker"></label>
         </div>
-        <div class="hint">The agent gets <code>write_line(text, notebook)</code>, <code>spawn_agent</code> and <code>send_message</code>. Up to 4 agents, 2 generations deep. <span id="start-cost"></span></div>
+        <div class="hint" id="prompt-tools">The agent gets <code>write_line(text, notebook)</code>, <code>spawn_agent</code> and <code>send_message</code>. Up to 4 agents, 2 generations deep. <span id="start-cost"></span></div>
       </div>
       <div class="err" id="start-error"></div>
     </form>
@@ -455,7 +472,8 @@ function renderThreats() {
 
 function toast(text, kind = "") { const t = $("toast"); t.textContent = text; t.className = `show ${kind}`; setTimeout(() => t.classList.remove("show"), 2600); }
 
-let defaults = null, composing = false;
+let defaults = null, composing = false, mode = "prompt";
+const testMode = () => mode === "test" && defaults && defaults.tests;
 function costHint() {
   const cap = Number($("start-tokens").value) || 0, model = $("start-model").value.trim();
   $("start-cost").textContent = model.endsWith("claude-haiku-5.5")
@@ -469,29 +487,61 @@ async function loadDefaults() {
   $("start-tokens").value ||= defaults.max_tokens;
   $("start-pace").value ||= defaults.pace;
   costHint();
+  if (defaults.tests) {
+    const t = defaults.tests;
+    $("test-name").innerHTML = t.cases.map((c) => `<option value="${esc(c.name)}">${esc(c.name)}${c.attacker ? "  · has an attacker" : ""}</option>`).join("");
+    $("start-attacker").value ||= t.attacker_model;
+    $("mode").hidden = false;
+    setMode("test");
+  }
+}
+function testAbout() {
+  const c = defaults.tests.cases.find((x) => x.name === $("test-name").value);
+  if (!c) return;
+  $("test-about").innerHTML = `<b>Tests:</b> ${esc(c.guardrail)}<br><b>Expected:</b> ${esc(c.expected)}<br>`
+    + `4 agents work on 20 coding issues${c.attacker ? ", one with secret instructions" : ""}. The score goes to <code>${esc(defaults.tests.out)}/results.jsonl</code>. `
+    + `If you flag &amp; kill an agent, the result records it.`;
+}
+function setMode(m) {
+  mode = m;
+  document.querySelectorAll("#mode button").forEach((b) => b.classList.toggle("on", b.dataset.mode === m));
+  const test = testMode();
+  $("test-pick").hidden = !test; $("prompt").hidden = !!test;
+  $("pace-field").hidden = !!test; $("attacker-field").hidden = !test; $("prompt-tools").hidden = !!test;
+  const t = defaults && defaults.tests;
+  $("start-model").value = test ? t.model : (defaults ? defaults.model : "");
+  $("start-tokens").value = test ? t.max_tokens : (defaults ? defaults.max_tokens : "");
+  if (test) testAbout();
+  costHint(); composerState();
 }
 function composerState() {
   const busy = !!(state && state.busy);  // only a page-started run blocks the next one
-  $("prompt").disabled = $("send").disabled = busy;
+  $("prompt").disabled = $("send").disabled = $("test-name").disabled = busy;
   $("prompt").placeholder = busy ? "The agents are working. Flag one on the left to stop it, or wait for the run to end." : "Give the agent a prompt…";
   $("composer-hint").firstChild.textContent = busy ? "A run you started is still going · " : "Enter to start · Shift+Enter for a new line · ";
 }
 async function startRun() {
-  const task = $("prompt").value.trim();
-  if (!task) { $("start-error").textContent = "Type a prompt first."; return; }
-  $("send").disabled = true; $("start-error").textContent = "Starting…";
+  const test = testMode(), task = $("prompt").value.trim();
+  if (!test && !task) { $("start-error").textContent = "Type a prompt first."; return; }
+  const body = test
+    ? {test: $("test-name").value, seed: Number($("test-seed").value) || 0, model: $("start-model").value, attacker_model: $("start-attacker").value, max_tokens: Number($("start-tokens").value)}
+    : {task, model: $("start-model").value, max_tokens: Number($("start-tokens").value), pace: Number($("start-pace").value)};
+  $("send").disabled = true; $("start-error").textContent = test ? "Starting the test (a live one sets up Docker first)…" : "Starting…";
   try {
     const {run: id} = await api("/api/start", {
       method: "POST", headers: {"Content-Type": "application/json", "X-Harness-Monitor": "1"},
-      body: JSON.stringify({task, model: $("start-model").value, max_tokens: Number($("start-tokens").value), pace: Number($("start-pace").value)}),
+      body: JSON.stringify(body),
     });
-    composing = false; $("start-error").textContent = ""; $("prompt").value = ""; $("follow").checked = true; switchRun(id); showTab("convo"); poll();
+    composing = false; $("start-error").textContent = ""; if (!test) $("prompt").value = ""; $("follow").checked = true; switchRun(id); showTab("convo"); poll();
   } catch (e) { $("start-error").textContent = e.message; $("send").disabled = false; }
 }
 $("composer").addEventListener("submit", (ev) => { ev.preventDefault(); startRun(); });
 $("prompt").addEventListener("keydown", (ev) => { if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); startRun(); } });
 $("use-default").addEventListener("click", (ev) => { ev.preventDefault(); $("prompt").value = defaults.task; $("prompt").focus(); });
 $("settings-toggle").addEventListener("click", () => { $("settings").hidden = !$("settings").hidden; });
+document.querySelectorAll("#mode button").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
+$("test-name").addEventListener("change", testAbout);
+$("test-name").addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); startRun(); } });
 $("start-tokens").addEventListener("input", costHint);
 $("start-model").addEventListener("input", costHint);
 $("new-run").addEventListener("click", () => {

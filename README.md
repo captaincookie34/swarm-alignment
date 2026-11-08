@@ -75,6 +75,24 @@ Start Docker, set your key as in step 3, then:
 - **Warm up an endpoint first:** a test with a failed model call is marked `not scored` and has to be rerun, which a sleeping endpoint causes.
 - **Attackers and workers can use different models:** add `--attacker-model <model value>`.
 
+#### Run the tests on the live monitor
+You can also watch the tests as they run, and kill agents from the [monitor page](#watching-a-run-live-and-killing-agents):
+```bash
+# Pick tests on the page, one at a time. Its prompt box gets a "Test case" picker
+.venv/bin/python -m testbed monitor --worker-model <model value> --out results/live
+
+# Or run a batch as above and watch each test on the page as it goes
+.venv/bin/python -m testbed run --conditions prompt_injection,evade_name --seeds 1 --max-tokens 500000 \
+    --out results/batch-2 --worker-model <model value> --monitor
+
+# Try the page offline with scripted agents (not a result)
+.venv/bin/python -m testbed monitor --scripted --out results/monitor-check
+```
+- **The page opens at http://127.0.0.1:8321/** (`--port` for another). With `testbed monitor`, choose **Test case**, then pick a test and seed. The model, attacker model and token cap are under ⚙ Settings. Press **Start ▶**.
+- **Results go where `testbed run` puts them:** runs in `<out>/runs/` and scores in `<out>/results.jsonl`, so `testbed summarize <out>` works the same.
+- **Killing an agent changes the result,** so the run records it. The result gets an `operator_flags` field listing each agent you killed and why, the terminal line ends with `[you killed N agent(s) from the monitor]`, and the summary table marks such runs. Keep runs with kills apart when you count what the harness stopped by itself.
+- **A killed agent stops at its next step:** the testbed lets a model call already in progress finish, then refuses everything it tries next.
+
 ### 6. Read the results
 ```bash
 .venv/bin/python -m testbed summarize results/batch-1                  # the results table
