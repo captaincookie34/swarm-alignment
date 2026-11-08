@@ -22,7 +22,7 @@ import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import parse_qs, urlparse
 
 from .identity import ID_PATTERN, LINEAGE_EDGES, Lineage, Signer
@@ -377,6 +377,17 @@ def agent_trace(ledger: list[dict], calls: list[dict], agent_id: str) -> dict:
     }
 
 
+class TestSource(Protocol):
+    """Test cases the page can start. The testbed provides one, so the harness doesn't import it."""
+
+    def catalog(self) -> list[dict]: ...  # [{"name", "guardrail", "expected", "attacker"}]
+    def defaults(self) -> dict: ...  # {"model", "attacker_model", "max_tokens"}
+    def start(self, name: str, model: str, attacker_model: str, max_tokens: int, seed: int) -> tuple[str, threading.Thread]:
+        """Start the test in a thread named harness-run-<run ID>, and return both."""
+        ...
+    def error(self, run_id: str) -> str | None: ...  # why a run failed before it began
+
+
 # Per million input and output tokens, for the cost line. Others show tokens only.
 _PRICES = {"claude-haiku-5.5": (0.10, 0.50), "claude-haiku-5-5": (0.10, 0.50)}
 _ROUND_ENDED = "(The harness ended this round"
@@ -492,11 +503,16 @@ class Monitor:
         self.default_model = ""  # the page's default; empty means the live default
         self.default_task = ""  # the page's default prompt; empty means the delegation job
         self.on_start = None  # called with the run directory of each page-started run
+        # Optional test cases the page can start, such as the testbed's. See TestSource.
+        self.tests: TestSource | None = None
 
     def defaults(self) -> dict:
         from .monitor_demo import LIVE_MAX_TOKENS, LIVE_MODEL, research_task
 
-        return {"task": self.default_task or research_task(), "model": self.default_model or LIVE_MODEL, "max_tokens": LIVE_MAX_TOKENS, "pace": 2.0}
+        out = {"task": self.default_task or research_task(), "model": self.default_model or LIVE_MODEL, "max_tokens": LIVE_MAX_TOKENS, "pace": 2.0}
+        if self.tests:
+            out["tests"] = {"cases": self.tests.catalog(), **self.tests.defaults()}
+        return out
 
     def start(self, task: str, model: str = "", max_tokens: int | None = None, pace: float = 2.0) -> str:
         """Start a live run from the page, in its own thread. One at a time, since each one costs money."""
@@ -530,14 +546,32 @@ class Monitor:
 
             self._started = threading.Thread(target=work, daemon=True, name=f"harness-run-{run_id}")
             self._started.start()
-        deadline = time.time() + 10  # wait for the run directory, so the page can switch to it
-        while not (self.runs_dir / run_id / "calls.jsonl").exists() and self._started.is_alive() and time.time() < deadline:
-            time.sleep(0.05)
-        if self.on_start:
-            self.on_start(self.runs_dir / run_id)
+        self._wait_for(run_id)
         if self.announce:
             self.log(f"started {run_id} on {spec if isinstance(spec, str) else 'a scripted model'}, capped at {max_tokens:,} tokens")
         return run_id
+
+    def start_test(self, name: str, model: str = "", attacker_model: str = "", max_tokens: int = 0, seed: int = 0) -> str:
+        """Start one test case from the page. It shares the one-at-a-time rule with prompts."""
+        if not self.tests:
+            raise ValueError("this monitor has no test cases. Start it with `python -m testbed monitor`")
+        with self._lock:
+            if self.busy():
+                raise ValueError("a run started from this page is still going. Flag it or wait for it to end first")
+            run_id, thread = self.tests.start(name, model.strip(), attacker_model.strip(), int(max_tokens or 0), int(seed or 0))
+            self._started = thread
+        self._wait_for(run_id)
+        if not (self.runs_dir / run_id).is_dir():
+            raise ValueError(self.tests.error(run_id) or f"{run_id} stopped before it started")
+        return run_id
+
+    def _wait_for(self, run_id: str) -> None:
+        """Wait for the run directory, so the page can switch to it."""
+        deadline = time.time() + 30
+        while not (self.runs_dir / run_id / "calls.jsonl").exists() and self._started.is_alive() and time.time() < deadline:
+            time.sleep(0.05)
+        if self.on_start and (self.runs_dir / run_id).is_dir():
+            self.on_start(self.runs_dir / run_id)
 
     def wait(self) -> None:
         """Block until the run started from here ends."""
@@ -713,7 +747,11 @@ def make_handler(monitor: Monitor) -> type[BaseHTTPRequestHandler]:
             if parts == ["api", "start"]:
                 try:
                     body = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length", 0)), 20_000)))
-                    run_id = monitor.start(str(body.get("task", "")), str(body.get("model", "")), body.get("max_tokens"), body.get("pace", 2.0))
+                    if body.get("test"):
+                        run_id = monitor.start_test(str(body["test"]), str(body.get("model", "")), str(body.get("attacker_model", "")),
+                                                    body.get("max_tokens", 0), body.get("seed", 0))
+                    else:
+                        run_id = monitor.start(str(body.get("task", "")), str(body.get("model", "")), body.get("max_tokens"), body.get("pace", 2.0))
                 except Exception as exc:  # e.g. a missing API key: show it on the page
                     return self._send(HTTPStatus.BAD_REQUEST, {"error": f"{type(exc).__name__}: {exc}" if not isinstance(exc, ValueError) else str(exc)})
                 return self._send(HTTPStatus.OK, {"run": run_id})
@@ -737,10 +775,12 @@ def make_handler(monitor: Monitor) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-def serve(runs_dir: Path, signer: Signer, port: int = DEFAULT_PORT, model_override: Any = None) -> ThreadingHTTPServer:
+def serve(runs_dir: Path, signer: Signer, port: int = DEFAULT_PORT, model_override: Any = None,
+          tests: TestSource | None = None) -> ThreadingHTTPServer:
     """Start the monitor in a background thread and return the server (call shutdown() to stop)."""
     runs_dir.mkdir(parents=True, exist_ok=True)
     monitor = Monitor(runs_dir, signer, model_override)
+    monitor.tests = tests
     server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(monitor))
     server.monitor = monitor  # type: ignore[attr-defined]
     threading.Thread(target=server.serve_forever, daemon=True, name="harness-monitor").start()

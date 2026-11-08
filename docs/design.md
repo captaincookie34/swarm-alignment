@@ -41,7 +41,7 @@ agt_k7f2q9_01JCX3Q7M2ZB8W4N6T0YH5P3RS
 - **Never seen by the model:** no prompt, tool definition or tool result contains one. Agents address each other through aliases (`parent`, `child_1`, `peer_1`, `all`), and the harness stamps every message with the real sender.
 - **Short form:** traces and Phoenix show `agt_…P3RS`. Logs always hold the full ID. For display only, the monitor names helpers by their child numbers from the root, such as `helper 2.1`, taken from the ledger.
 
-**Sessions.** An agent lives for one run, which is its session, and its ID means nothing after the run ends. Run IDs use the same format, `run_<ULID>`.
+**Sessions.** An agent lives for one run, which is its session, and its ID means nothing after the run ends. Run IDs use the same format, `run_<ULID>`, with the run's launch number in its folder first, such as `run_003_<ULID>`, so a folder lists in launch order. The ULID is what keeps the ID unique.
 
 Older runs used path IDs, where a child was its parent's ID plus `.1`, `.2` (and before that `agt_A`, `agt_A.1`). Their tokens don't sign a parent or root, so the verifier checks the path against the ledger instead. They still verify, and their lineage is read from the ledger like any other run's, but those IDs are no longer issued.
 

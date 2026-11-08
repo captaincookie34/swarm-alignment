@@ -146,3 +146,37 @@ async def test_reasoning_is_sent_back_on_later_turns(tmp_path, server):
     await run(tmp_path)
     assistant = next(m for m in server["requests"][1]["messages"] if m["role"] == "assistant")
     assert assistant["reasoning_content"] == "I should look this up."
+
+
+# Only hidden reasoning, no text or tool call: Pydantic AI retries it with a system message.
+EMPTY = {"role": "assistant", "content": "", "reasoning_content": "(The harness ended this round.)"}
+
+
+def strict_template():
+    """Answer like llama.cpp with Qwen's template: a system message after the start is a 500."""
+    def check(body):
+        roles = [m["role"] for m in body["messages"]]
+        first_other = next((i for i, r in enumerate(roles) if r != "system"), len(roles))
+        return "system" not in roles[first_other:]
+
+    return check
+
+
+async def test_an_empty_reply_retry_doesnt_break_a_strict_chat_template(tmp_path, server):
+    check = strict_template()
+    server["replies"] = [httpx2.Response(200, json=completion(EMPTY))]
+    outcome, result = await run(tmp_path)
+
+    assert all(check(body) for body in server["requests"])
+    assert outcome.status == "completed" and result.status == VERIFIED
+    retry = server["requests"][1]["messages"][-1]
+    assert retry["role"] == "user" and retry["content"].startswith("[Harness] ")
+    assert server["requests"][1]["messages"][0]["role"] == "system"  # the system prompt stays first
+
+
+async def test_without_the_fix_the_retry_would_be_a_late_system_message(tmp_path, server, monkeypatch):
+    monkeypatch.setattr(runner, "EndpointChatModel", runner.OpenAIChatModel)
+    check = strict_template()
+    server["replies"] = [httpx2.Response(200, json=completion(EMPTY))]
+    await run(tmp_path)
+    assert not check(server["requests"][1])

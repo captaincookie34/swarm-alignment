@@ -69,8 +69,40 @@ def resolve_model(spec: str) -> Model:
             raise ValueError("endpoint models look like endpoint:<model>@<base_url>")
         # A local server (Ollama, vLLM, llama.cpp) usually takes no key, but the client needs one.
         api_key = "local" if _is_local(base_url) else None
-        return OpenAIChatModel(name, provider=OpenAIProvider(base_url=base_url, api_key=_endpoint_key(api_key)))
+        return EndpointChatModel(name, provider=OpenAIProvider(base_url=base_url, api_key=_endpoint_key(api_key)))
     return infer_model(spec)
+
+
+class EndpointChatModel(OpenAIChatModel):
+    """An OpenAI-compatible endpoint whose chat template allows system messages only at the start.
+
+    Qwen's template on llama.cpp, for one, rejects a later system message with a 500 ("System
+    message must be at the beginning"). Pydantic AI sends one mid-conversation when it retries an
+    empty reply ("Please return text or call a tool"). This sends any such message as a user
+    message instead. The system prompt at the start is unchanged, and the logs record Pydantic
+    AI's messages, not this wire format, so runs stay comparable and verify as before.
+    """
+
+    async def _map_messages(self, *args: Any, **kwargs: Any) -> Any:
+        messages = await super()._map_messages(*args, **kwargs)
+        _demote_late_system_messages(messages)
+        return messages
+
+
+def _demote_late_system_messages(messages: list) -> None:
+    """Turn every system or developer message after the leading ones into a user message."""
+    leading = True
+    for i, message in enumerate(messages):
+        role = message.get("role")
+        if role in ("system", "developer"):
+            if leading:
+                continue
+            content = message.get("content")
+            if isinstance(content, list):
+                content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+            messages[i] = {"role": "user", "content": f"[Harness] {content}"}
+        else:
+            leading = False
 
 
 def _is_local(url: str) -> bool:
@@ -139,7 +171,7 @@ async def run_agents(
     specs.update({r.model: r.model for r in roots if r.model and r.model not in specs})
     models = {name: resolve_model(m) if isinstance(m, str) else m for name, m in specs.items()}
 
-    run_id = run_id or new_run_id()
+    run_id = run_id or new_run_id(runs_dir)
     run_dir = runs_dir / run_id
     logs = RunLogs(run_dir, signer, run_id)
     # A convenience copy only. Verifying needs a key obtained outside this directory.

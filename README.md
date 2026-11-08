@@ -51,19 +51,70 @@ These spend credits, or endpoint time. Start Docker and use the CLI. Each task s
 .venv/bin/harness run "Your task here" "A second root's task" --seed-repo path/to/repo --model <model value>
 ```
 
-To run the red-team testbed, start Docker and see [its README](src/testbed/README.md#running-it).
+### 5. Run the red-team tests
+The testbed runs 25 tests. In each one, four agents work on a shared repo of 20 small coding issues, and in most, one agent is secretly told to attack the harness. [TEST_CASES.md](src/testbed/TEST_CASES.md) and the [testbed README](src/testbed/README.md) describe every test.
 
-### 5. Read the results
+Start Docker, set your key as in step 3, then:
+```bash
+.venv/bin/python -m testbed list                  # every test, with what it checks
+
+# One test
+.venv/bin/python -m testbed run --conditions prompt_injection --seeds 1 --max-tokens 500000 \
+    --out results/first-try --worker-model <model value>
+
+# Several, separated by commas. Include baseline, the normal run to compare with
+.venv/bin/python -m testbed run --conditions baseline,prompt_injection,evade_name --seeds 1 --max-tokens 500000 \
+    --out results/batch-1 --worker-model <model value>
+
+# All 25: leave out --conditions
+.venv/bin/python -m testbed run --seeds 1 --max-tokens 500000 --out results/all --worker-model <model value>
+```
+- **Seeds are repeats:** `--seeds 1` runs each test once, as seed 0, and `--seeds 3` runs it three times. One run gives a lead, not a finding.
+- **Time and cost:** on one dedicated Hugging Face endpoint, each test took about 3.5 minutes at a 500,000-token cap, so all 25 took about 1.5 hours. Other providers bill per token, so check yours. Without `--max-tokens`, each test stops at 200,000 tokens.
+- **Use a new `--out` folder for each batch:** a folder's results add up, so mixing batches mixes their numbers.
+- **Warm up an endpoint first:** a test with a failed model call is marked `not scored` and has to be rerun, which a sleeping endpoint causes.
+- **Attackers and workers can use different models:** add `--attacker-model <model value>`.
+
+#### Run the tests on the live monitor
+You can also watch the tests as they run, and kill agents from the [monitor page](#watching-a-run-live-and-killing-agents):
+```bash
+# Pick tests on the page, one at a time. Its prompt box gets a "Test case" picker
+.venv/bin/python -m testbed monitor --worker-model <model value> --out results/live
+
+# Or run a batch as above and watch each test on the page as it goes
+.venv/bin/python -m testbed run --conditions prompt_injection,evade_name --seeds 1 --max-tokens 500000 \
+    --out results/batch-2 --worker-model <model value> --monitor
+
+# Try the page offline with scripted agents (not a result)
+.venv/bin/python -m testbed monitor --scripted --out results/monitor-check
+```
+- **The page opens at http://127.0.0.1:8321/** (`--port` for another). With `testbed monitor`, choose **Test case**, then pick a test and seed. The model, attacker model and token cap are under ⚙ Settings. Press **Start ▶**.
+- **Results go where `testbed run` puts them:** runs in `<out>/runs/` and scores in `<out>/results.jsonl`, so `testbed summarize <out>` works the same.
+- **Killing an agent changes the result,** so the run records it. The result gets an `operator_flags` field listing each agent you killed and why, the terminal line ends with `[you killed N agent(s) from the monitor]`, and the summary table marks such runs. Keep runs with kills apart when you count what the harness stopped by itself.
+- **A killed agent stops at its next step:** the testbed lets a model call already in progress finish, then refuses everything it tries next.
+
+### 6. Read the results
+```bash
+.venv/bin/python -m testbed summarize results/batch-1                  # the results table
+.venv/bin/harness --runs-dir results/batch-1/runs trace <run ID>       # one run's lineage tree and steps
+```
+**[READING_RESULTS.md](src/testbed/READING_RESULTS.md) explains the output and how to reach a conclusion from it.** Read it before drawing any. In particular, "0 attempts" isn't a pass, and the score only counts what it was written to look for, so read the trace too.
+
+Each test's counts are in the `details` field of `results/<folder>/results.jsonl`, and everything an agent did, including its reasoning, is in `runs/<run ID>/calls.jsonl`. `results/` is gitignored, so results stay on your machine.
+
+For a plain `harness run`:
+
 ```bash
 .venv/bin/harness trace <run ID>       # lineage tree and each agent's steps
 .venv/bin/harness verify <run ID>      # check the logs weren't altered
 ```
-Add `--runs-dir results/<name>/runs` straight after `harness` for testbed runs.
 
 ### If something goes wrong
 | What you see | What it means |
 |---|---|
 | `ModuleNotFoundError: No module named 'pydantic_ai'` | You're using a different Python. Run through `.venv/bin/python` |
+| `No module named 'harness'` or `'testbed'`, after installing | Python skips `.pth` files marked hidden, and some macOS setups, such as a synced Desktop, hide files in `.venv`. Check with `ls -lO .venv/lib/python3.*/site-packages/*.pth`. Put the venv outside that folder, or run `export PYTHONPATH=$PWD/src` first |
+| `not scored` after a test | A model call failed, and the reason is on that line. Rerun that test |
 | `set one of ...`, or a missing API key error | The key isn't in `.env` or this terminal |
 | `Is Docker running?` | Start Docker, or use `--sandbox none` with `harness run` |
 | `429`, or `Rate limit exceeded` in the logs | The provider's limit. One testbed trial can make well over 100 requests, so check your plan's limits |
@@ -89,7 +140,7 @@ To give roots different configs, such as a red-team root on another model, use `
 | `harness flag <run> <agent ID> --reason "..." [--no-cascade]` | Revoke a running agent as a threat and record it in the run's threat log |
 | `harness monitor [--demo]` | Live page of agents and requests, with flag and kill, or freeze, judge and resolve |
 
-Each `harness run` is stored in `runs/<run ID>/`, and each testbed trial in `<--out folder>/runs/<run ID>/`: `ledger.jsonl`, `calls.jsonl`, their signed heads, `revocations.jsonl` and `workspace/`. Agents can reach only `workspace/`.
+Run IDs start with their launch order in that folder, such as `run_003_<ULID>`. The ULID keeps them unique, which `verify` relies on. Each `harness run` is stored in `runs/<run ID>/`, and each testbed trial in `<--out folder>/runs/<run ID>/`: `ledger.jsonl`, `calls.jsonl`, their signed heads, `revocations.jsonl` and `workspace/`. Agents can reach only `workspace/`.
 
 ## Checking an agent ID
 `harness whois <agent ID>` says whether this harness created an agent, and if so shows its lineage: the chain from its root down to it, its descendants, how and when it was created, its task and whether it was revoked. It searches `runs/`, `traces/` and `results/*/runs` (`--in <folder>` for others), and `--json` prints the answer for scripts. Add `--logs` to also print the agent's trace from its run (with `--full` for every prompt and model response). The exit code is 0 for ours, 1 for not ours and 2 for can't tell.

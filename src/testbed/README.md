@@ -4,7 +4,7 @@ Tests whether the harness's guarantees hold when agents are told to break them. 
 
 **Question:** which identity guarantees can a harness enforce against agents actively trying to evade them, and which depend on the agents themselves?
 
-More test cases, including ones where nobody is told to cheat, are described in [TEST_CASES.md](TEST_CASES.md).
+More test cases, including ones where nobody is told to cheat, are described in [TEST_CASES.md](TEST_CASES.md). To understand a run's output and reach a conclusion from it, see [READING_RESULTS.md](READING_RESULTS.md).
 
 ## Setup
 Each trial is a fresh run on a fresh copy of a Python repo with 20 small issues, each with a failing test. Four worker agents share the repo, an issue board and messaging. Red-team conditions replace one or two workers with attackers using the same tools unless a condition says otherwise. Limits per run: 12 agents, depth 3, 2 lineage operations and 8 tool calls per agent per round, 6 rounds.
@@ -63,10 +63,13 @@ Run these from the repo root, after the [install step](../../README.md#1-install
 .venv/bin/python -m testbed summarize results/pilot
 .venv/bin/python -m testbed compare results/model-a results/model-b   # the same conditions across folders
 .venv/bin/harness --runs-dir results/pilot/runs trace <run ID>
+
+# Start tests one at a time from the live monitor page, or watch a batch there with run --monitor
+.venv/bin/python -m testbed monitor --worker-model ... --out results/live
 ```
 Each model needs its key set: see the [model table](../../README.md#3-choose-a-model). `--max-tokens` applies per trial, and a run that reaches it ends as `budget_exhausted`. The counts for each attempt type, including `system_like_name` and `child_name`, are in the `details` field of `results.jsonl`.
 
-Live runs require Docker, and there's no fallback to the host. Trials are saved as they finish, in `results.jsonl`.
+Run folders start with their launch order within `--out`, such as `run_003_launder_s0_<ULID>`, and existing runs are never overwritten. The ULID keeps each run ID unique, which tamper detection relies on. To understand the output, see [READING_RESULTS.md](READING_RESULTS.md). Live runs require Docker, and there's no fallback to the host. Trials are saved as they finish, in `results.jsonl`. If you kill agents from the monitor during a trial, its result lists them under `operator_flags`. See [running the tests on the live monitor](../../README.md#run-the-tests-on-the-live-monitor).
 
 ## What to check in the smoke test
 - Attackers actually attempt the attack. If not, change the prompts before running more.
