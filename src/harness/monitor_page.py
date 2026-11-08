@@ -74,6 +74,62 @@ button.twisty:hover { border-color: var(--accent); color: var(--accent); }
 .panel-tools button { background: transparent; border: 1px solid var(--line); color: var(--muted); border-radius: 6px; padding: 1px 8px; font-size: 11px; cursor: pointer; }
 .panel-tools button:hover { color: var(--text); border-color: var(--muted); }
 #convo .c.folded { display: none !important; }
+body.analysis-mode main { display: none; }
+#analysis { padding: 16px 18px 40px; max-width: 1400px; margin: 0 auto; }
+#analysis .a-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+#analysis .a-head h2 { margin: 0; font-size: 18px; }
+#analysis .a-head .run-id { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+#analysis .a-head .close-a { margin-left: auto; }
+.a-badge { font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); font-family: var(--mono); }
+.a-badge.good { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, transparent); }
+.a-badge.bad { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 50%, transparent); }
+.a-badge.live { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, transparent); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 18px; }
+.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.tile .k { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); }
+.tile .v { font-size: 22px; font-weight: 650; margin-top: 2px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; line-height: 1.2; }
+.tile .v .word { font-size: 17px; }
+.tile .s { font-size: 12px; color: var(--muted); }
+.tile.danger .v { color: var(--danger); } .tile.ice .v { color: var(--ice); } .tile.ok .v { color: var(--ok); } .tile.retired .v { color: #d2a8ff; }
+.a-section { margin: 22px 0 10px; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.a-section h3 { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); }
+.a-section .chips { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+.a-section .chips button { background: transparent; border: 1px solid var(--line); color: var(--muted); border-radius: 999px; padding: 2px 10px; font-size: 12px; cursor: pointer; }
+.a-section .chips button.on { color: var(--text); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.answer { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.qa { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; min-width: 0; }
+.qa .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin-bottom: 6px; }
+.textbox { white-space: pre-wrap; font-size: 13px; line-height: 1.5; max-height: 220px; overflow-y: auto; overflow-wrap: anywhere; }
+.textbox.empty { color: var(--quiet); font-style: italic; }
+.kill-card { background: var(--panel); border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line)); border-radius: 10px; padding: 10px 14px; margin-bottom: 10px;
+  display: grid; grid-template-columns: 1fr auto 1fr; gap: 14px; align-items: center; }
+.kill-card .side { min-width: 0; font-size: 13px; }
+.kill-card .side .t { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin-bottom: 4px; }
+.kill-card .arrow { font-size: 20px; color: var(--ice); }
+.kill-card .who { font-weight: 600; cursor: pointer; }
+.kill-card .k-note { color: var(--muted); font-size: 12px; margin-top: 3px; }
+.a-agent { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 10px; border-left: 4px solid var(--who); }
+.a-agent.revoked { border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); border-left-color: var(--danger); }
+.a-agent.retired { border-left-color: #d2a8ff; }
+.a-agent.orch { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ice) 45%, transparent); }
+.a-agent .top { display: flex; align-items: center; gap: 8px; padding: 9px 12px; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
+.a-agent .top .nm { font-weight: 650; }
+.a-agent .top .meta { margin-left: auto; font-size: 12px; color: var(--muted); font-family: var(--mono); }
+.a-agent .cols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.a-agent .col { padding: 10px 12px; min-width: 0; }
+.a-agent .col + .col { border-left: 1px solid var(--line); }
+.a-agent .col .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin-bottom: 5px; }
+.a-agent .col .lbl i { text-transform: none; font-style: normal; letter-spacing: 0; color: var(--quiet); }
+.a-agent .why { padding: 7px 12px; font-size: 12.5px; border-top: 1px solid var(--line); }
+.a-agent .why.kill { color: var(--danger); background: color-mix(in srgb, var(--danger) 7%, transparent); }
+.a-agent .why.repl { color: var(--ice); background: color-mix(in srgb, var(--ice) 7%, transparent); }
+.a-agent details { padding: 0 12px 10px; font-size: 12.5px; }
+.a-agent details summary { cursor: pointer; color: var(--muted); }
+.a-agent details .textbox { margin-top: 6px; border-left: 2px solid var(--line); padding-left: 10px; }
+.badge.replacement { background: color-mix(in srgb, var(--ice) 20%, transparent); color: var(--ice); }
+button.analysis-btn { background: var(--panel-2); border: 1px solid var(--line); color: var(--text); border-radius: 6px; padding: 5px 10px; cursor: pointer; font-size: 13px; }
+button.analysis-btn:hover, button.analysis-btn.on { border-color: var(--accent); color: var(--accent); }
+@media (max-width: 900px) { .answer, .a-agent .cols, .kill-card { grid-template-columns: 1fr; } .a-agent .col + .col { border-left: 0; border-top: 1px solid var(--line); } .kill-card .arrow { transform: rotate(90deg); } }
 .id { font-family: var(--mono); font-size: 13px; font-weight: 600; }
 .badge { font-size: 11px; padding: 1px 7px; border-radius: 4px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }
 .badge.active { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
@@ -245,6 +301,7 @@ pre.block { margin: 4px 0 0; padding: 8px 10px; background: var(--bg); border: 1
 <header>
   <h1>Harness monitor <span>· live agents</span></h1>
   <button class="start" id="new-run">＋ New run</button>
+  <button class="analysis-btn" id="analysis-btn" title="What each agent was asked and produced, every kill and its replacement">📊 Final analysis</button>
   <select id="run" aria-label="Run"></select>
   <label class="toggle"><input type="checkbox" id="follow" checked> follow newest run</label>
   <span id="status" class="pill">no run</span>
@@ -287,6 +344,7 @@ pre.block { margin: 4px 0 0; padding: 8px 10px; background: var(--bg); border: 1
       <tbody id="threat-rows"></tbody></table><div class="empty" id="no-threats">No agents flagged in this run.</div></div>
   </section>
 </main>
+<section id="analysis" hidden></section>
 <dialog id="dialog">
   <form method="dialog" id="flag-form">
     <h3>Flag <span id="flag-id"></span> as a threat</h3>
@@ -370,6 +428,7 @@ async function refreshRuns() {
 
 function switchRun(id) {
   run = id; lastSeq = -1; events = []; selected = null; colours = {}; convoStarts = {}; youShown = false; folded = new Set();
+  analysisData = null; if (analysisOpen) loadAnalysis();
   $("feed").innerHTML = ""; $("convo").innerHTML = ""; renderFilter();
 }
 
@@ -381,6 +440,117 @@ async function poll() {
   s.agents.forEach((a) => colour(a.id));  // colours follow creation order, so they don't change between refreshes
   if (s.events.length) { lastSeq = s.events[s.events.length - 1].seq; events.push(...s.events); appendEvents(s.events); }
   renderStatus(); renderAgents(); renderOrchestrator(); renderThreats(); composerState();
+  // When a run you're watching ends, open its final analysis once.
+  if (wasRunning[s.run] && !s.running && !analysisShownFor.has(s.run)) { analysisShownFor.add(s.run); openAnalysis(); }
+  wasRunning[s.run] = s.running;
+  if (analysisOpen && s.running && Date.now() - analysisFetched > 3000) loadAnalysis();
+}
+
+// --- Final analysis: what each agent was asked and produced, and every kill with what replaced it ---
+let analysisOpen = false, analysisData = null, analysisFetched = 0, analysisFilter = "all";
+const wasRunning = {}, analysisShownFor = new Set();
+function openAnalysis() { analysisOpen = true; document.body.classList.add("analysis-mode"); $("analysis").hidden = false; $("analysis-btn").classList.add("on"); loadAnalysis(); }
+function closeAnalysis() { analysisOpen = false; document.body.classList.remove("analysis-mode"); $("analysis").hidden = true; $("analysis-btn").classList.remove("on"); }
+async function loadAnalysis() {
+  if (!run) { $("analysis").innerHTML = `<div class="empty">No run selected.</div>`; return; }
+  analysisFetched = Date.now();
+  try { analysisData = await api(`/api/runs/${encodeURIComponent(run)}/analysis`); renderAnalysis(); }
+  catch (e) { $("analysis").innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+}
+const dur = (s) => s < 60 ? `${s.toFixed(0)}s` : `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+const textbox = (t, empty) => t ? `<div class="textbox">${esc(t)}</div>` : `<div class="textbox empty">${esc(empty)}</div>`;
+function renderAnalysis() {
+  const d = analysisData; if (!d) return;
+  const byId = Object.fromEntries(d.agents.map((a) => [a.id, a]));
+  d.agents.forEach((a) => colour(a.id));
+  const rootOf = (id) => { let a = byId[id]; while (a && a.parent) a = byId[a.parent]; return a; };
+  const firstRoot = d.agents.find((a) => !a.parent);
+  const label = (id) => {
+    const a = byId[id]; if (!a) return short(id);
+    if (!a.parent) return a === firstRoot ? "agent" : `root ${short(id)}`;
+    return rootOf(id) === firstRoot ? `helper ${a.path}` : short(id);
+  };
+  const nm = (id) => `<span class="who" style="color:${colour(id)}" data-a-agent="${esc(id)}" title="${esc(id)}">${esc(label(id))}</span>`;
+  const c = d.counts;
+  const integrity = d.running ? `<span class="a-badge live">still running · numbers so far</span>`
+    : `<span class="a-badge ${String(d.integrity).startsWith("VERIFIED") ? "good" : "bad"}" title="${esc(d.integrity)}">logs ${esc(String(d.integrity).split(" ")[0].toLowerCase())}</span>`;
+  const tiles = [
+    ["status", `<span class="word">${esc(String(d.status).replace(/_/g, " "))}</span>`, `${d.rounds} rounds`, d.status === "completed" ? "ok" : ""],
+    ["agents", c.agents, `${c.completed} completed${c.other ? `, ${c.other} other` : ""}`, ""],
+    ["killed", c.killed, "revoked as threats", c.killed ? "danger" : ""],
+    ["retired", c.retired, "cleared, work handed up", c.retired ? "retired" : ""],
+    ["replacements", c.replacements, "started by the orchestrator", c.replacements ? "ice" : ""],
+    ["tokens", (d.tokens.input + d.tokens.output).toLocaleString(), `${d.tokens.input.toLocaleString()} in · ${d.tokens.output.toLocaleString()} out`, ""],
+    ["cost", d.cost == null ? "—" : `$${d.cost.toFixed(d.cost < 0.1 ? 3 : 2)}`, d.cost == null ? "unknown model price" : esc(d.models.join(", ")), ""],
+    ["duration", dur(d.duration), d.ended ? "start to end" : "so far", ""],
+  ].map(([k, v, sub, cls]) => `<div class="tile ${cls}"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${sub}</div></div>`).join("");
+
+  const roots = d.agents.filter((a) => !a.parent);
+  const answers = roots.map((r) => `<div class="answer">
+      <div class="qa"><div class="lbl">${roots.length > 1 ? `${nm(r.id)} was asked` : "You asked"}</div>${textbox(r.task, "no prompt recorded")}</div>
+      <div class="qa"><div class="lbl">Final answer <i style="text-transform:none;font-style:normal;color:var(--quiet)">· ${esc(r.final_source)}</i></div>${textbox(longestRecent(r), r.status === "revoked" ? "killed before it answered" : "no answer")}</div>
+    </div>`).join('<div style="height:10px"></div>');
+
+  const kills = d.kills.length ? d.kills.map((k) => {
+    const target = byId[k.target] || {};
+    const repl = k.replacements.map((id) => `${nm(id)} under ${nm((byId[id] || {}).parent)}`).join(", ");
+    const others = k.killed.filter((id) => id !== k.target);
+    return `<div class="kill-card">
+      <div class="side"><div class="t">${k.kind === "freeze" ? "judged a threat after a freeze" : "killed"} · round ${k.round ?? "?"}</div>
+        ☠ ${nm(k.target)}${target.killed && target.killed.reason ? ` <span class="k-note">“${esc(target.killed.reason)}”</span>` : ""}
+        ${others.length ? `<div class="k-note">also killed: ${others.map(nm).join(", ")}</div>` : ""}
+        ${k.retired.length ? `<div class="k-note">retired, work saved: ${k.retired.map(nm).join(", ")}</div>` : ""}
+        <div class="k-note">task: ${esc((target.task || "").slice(0, 140))}${(target.task || "").length > 140 ? "…" : ""}</div></div>
+      <div class="arrow">→</div>
+      <div class="side"><div class="t">result</div>${repl ? `↻ replaced by ${repl}` : `<span class="k-note">no replacement${target.parent ? "" : ": it had no parent"}</span>`}
+        ${k.replacements.map((id) => { const r = byId[id]; return r ? `<div class="k-note">${nm(id)} ended ${esc(r.status)}${r.sent_up.length ? ", and reported back to its parent" : ""}</div>` : ""; }).join("")}</div>
+    </div>`;
+  }).join("") : `<div class="empty" style="padding:8px 0">Nothing was killed in this run.</div>`;
+
+  const keep = (a) => analysisFilter === "all" || (analysisFilter === "killed" && a.status === "revoked")
+    || (analysisFilter === "spawned" && a.made_by === "orchestrator") || (analysisFilter === "retired" && a.status === "retired");
+  const ordered = treeOrder(d.agents).filter(keep);
+  const cards = ordered.map((a) => {
+    const badges = [`<span class="badge ${["revoked", "retired", "frozen"].includes(a.status) ? a.status : a.status === "completed" ? "done" : "active"}">${esc(a.status)}</span>`,
+      a.flagged ? `<span class="badge threat">threat</span>` : "",
+      a.made_by === "orchestrator" ? `<span class="badge replacement">replacement</span>` : ""].join("");
+    const last = a.sent_up[a.sent_up.length - 1];
+    const why = [
+      a.killed ? `<div class="why kill">☠ killed in round ${a.killed.round ?? "?"}${a.killed.direct ? `: “${esc(a.killed.reason)}”` : ` along with ${nm(a.killed.with)}`}${a.replaced_by.length ? ` · replaced by ${a.replaced_by.map(nm).join(", ")}` : ""}</div>` : "",
+      a.status === "retired" ? `<div class="why repl">⇡ cleared but cut off below a threat: retired, ${a.retired_work} piece${a.retired_work === 1 ? "" : "s"} of work handed to the replacement</div>` : "",
+      a.made_by === "orchestrator" ? `<div class="why repl">↻ started by the orchestrator under ${nm(a.parent)} to replace ${nm(a.replaces)}</div>` : "",
+    ].join("");
+    const replies = a.replies.length > 1 ? `<details><summary>all ${a.replies.length} replies</summary>${a.replies.map((r) => `<div class="textbox">round ${r.round}: ${esc(r.text)}</div>`).join("")}</details>` : "";
+    return `<div class="a-agent ${a.status} ${a.made_by === "orchestrator" ? "orch" : ""}" style="--who:${colour(a.id)};margin-left:${Math.min(a.depth, 4) * 22}px">
+      <div class="top"><span class="dot" style="background:${colour(a.id)}"></span>${nm(a.id)}<span class="gen">${generation(a.depth)}</span>${badges}
+        <span class="meta">${a.tool_calls} tools · ${a.tokens.toLocaleString()} tok${a.parent ? ` · from ${esc(label(a.parent))}` : ""}</span></div>
+      <div class="cols">
+        <div class="col"><div class="lbl">First input</div>${textbox(a.task, "no task recorded")}</div>
+        <div class="col"><div class="lbl">Sent to its parent ${a.sent_up.length > 1 ? `<i>· last of ${a.sent_up.length}</i>` : ""}</div>${textbox(last && last.text, a.parent ? "never reported back" : "no parent: see its final answer")}</div>
+        <div class="col"><div class="lbl">Final output <i>· ${esc(a.final_source)}</i></div>${textbox(a.final, "nothing")}</div>
+      </div>${why}${replies}
+    </div>`;
+  }).join("") || `<div class="empty">No agents match.</div>`;
+
+  const chip = (key, text, n) => `<button data-a-filter="${key}" class="${analysisFilter === key ? "on" : ""}">${text}${n != null ? ` ${n}` : ""}</button>`;
+  $("analysis").innerHTML = `
+    <div class="a-head"><h2>Final analysis</h2><span class="run-id">${esc(d.run)}</span>${integrity}<button class="analysis-btn close-a" id="close-analysis">← Back to the live view</button></div>
+    <div class="tiles">${tiles}</div>
+    <div class="a-section"><h3>The answer</h3></div>${answers}
+    <div class="a-section"><h3>Kills and what replaced them</h3></div>${kills}
+    <div class="a-section"><h3>Every agent</h3><div class="chips">${chip("all", "all", c.agents)}${chip("killed", "killed", c.killed)}${chip("spawned", "spawned after a kill", c.replacements)}${chip("retired", "retired", c.retired)}</div></div>
+    ${cards}`;
+}
+// The root's answer: its final reply, unless an earlier reply was the real deliverable (much longer).
+function longestRecent(a) {
+  if (!a.replies.length) return a.final;
+  const longest = a.replies.reduce((x, y) => (y.text.length > x.text.length ? y : x));
+  return a.final && a.final.length >= longest.text.length / 3 ? a.final : longest.text;
+}
+function treeOrder(list) {
+  const kids = {}; list.forEach((a) => (kids[a.parent || ""] ||= []).push(a));
+  const out = [], walk = (p) => (kids[p] || []).forEach((a) => { out.push(a); walk(a.id); });
+  walk(""); return out;
 }
 
 function renderStatus() {
@@ -742,6 +912,12 @@ setInterval(() => { if (tracing && state && state.running) refreshTrace(); }, 15
 document.addEventListener("click", (ev) => {
   const traceBtn = ev.target.closest("[data-trace]");
   if (traceBtn) { ev.preventDefault(); ev.stopPropagation(); openTrace(traceBtn.dataset.trace); return; }
+  if (ev.target.id === "analysis-btn") { analysisOpen ? closeAnalysis() : openAnalysis(); return; }
+  if (ev.target.id === "close-analysis") { closeAnalysis(); return; }
+  const aFilter = ev.target.closest("[data-a-filter]");
+  if (aFilter) { analysisFilter = aFilter.dataset.aFilter; renderAnalysis(); return; }
+  const aAgent = ev.target.closest("[data-a-agent]");
+  if (aAgent) { closeAnalysis(); selected = aAgent.dataset.aAgent; showTab("convo"); renderFilter(); renderAgents(); redrawFeed(); return; }
   const foldBtn = ev.target.closest("[data-fold]");
   if (foldBtn) {
     ev.stopPropagation();
@@ -844,6 +1020,7 @@ tick();
 if (location.hash === "#new") $("prompt").focus();
 const traceHash = /^#trace=(.+)$/.exec(location.hash);  // e.g. #trace=agt_… opens that agent's trace once it exists
 if (traceHash) setTimeout(() => openTrace(decodeURIComponent(traceHash[1])), 1500);
+if (location.hash === "#analysis") setTimeout(openAnalysis, 1500);  // a link straight to the final analysis
 const selectHash = /^#select=(.+)$/.exec(location.hash);  // e.g. #select=agt_… highlights that agent
 if (selectHash) setTimeout(() => { selected = decodeURIComponent(selectHash[1]); renderFilter(); renderAgents(); redrawFeed(); }, 1500);  // a link that opens straight to New run
 </script>

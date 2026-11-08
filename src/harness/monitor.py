@@ -361,6 +361,106 @@ def agent_trace(ledger: list[dict], calls: list[dict], agent_id: str) -> dict:
     }
 
 
+# Per million input and output tokens, for the cost line. Others show tokens only.
+_PRICES = {"claude-haiku-5.5": (0.10, 0.50), "claude-haiku-5-5": (0.10, 0.50)}
+_ROUND_ENDED = "(The harness ended this round"
+
+
+def analysis(ledger: list[dict], calls: list[dict], threats: list[dict]) -> dict:
+    """The end-of-run summary: for each agent, what it was asked and what it produced, and every kill
+    with the replacement it led to."""
+    lineage = Lineage.from_ledger(ledger)
+    out: dict[str, dict] = {}
+    for e in ledger:
+        if e["type"] in _LINEAGE:
+            out[e["child"]] = {
+                "id": e["child"], "parent": lineage.parent(e["child"]), "depth": lineage.depth(e["child"]),
+                "path": lineage.path(e["child"]), "edge": e["type"], "created_round": e.get("round"),
+                "made_by": e.get("made_by"), "replaces": e.get("replaces"), "replaced_by": [],
+                "task": _clip(str(e.get("task", ""))), "model": e.get("config", {}).get("model", ""),
+                "status": "active", "replies": [], "sent_up": [], "final": "", "killed": None, "retired_work": None,
+                "tokens": 0, "tool_calls": 0, "refused": 0, "ended_round": None,
+            }  # fmt: skip
+    for a in out.values():
+        if a["replaces"] in out:
+            out[a["replaces"]]["replaced_by"].append(a["id"])
+    tokens_in = tokens_out = 0
+    models: set[str] = set()
+    kills = []
+    for e in calls:
+        kind, p, agent = e["type"], e.get("payload", {}), out.get(e["agent_id"])
+        if kind == "model.response":
+            tokens_in += p.get("input_tokens") or 0
+            tokens_out += p.get("output_tokens") or 0
+            models.add(str(p.get("model") or ""))
+        if kind == "orchestrator.kill" or kind == "orchestrator.resolved":
+            kills.append({"seq": e["seq"], "round": e.get("round"), "ts": e["ts"], "kind": "kill" if kind == "orchestrator.kill" else "freeze",
+                          "target": p.get("agent_id"), "killed": p.get("killed") or p.get("threats", []),
+                          "retired": p.get("retire", []), "replacements": p.get("replacements", [])})  # fmt: skip
+        if agent is None:
+            continue
+        if kind == "model.response":
+            agent["tokens"] += (p.get("input_tokens") or 0) + (p.get("output_tokens") or 0)
+            said = "\n\n".join(x.get("content", "") for x in p.get("parts", []) if x.get("part_kind") == "text").strip()
+            if said and not said.startswith(_ROUND_ENDED):
+                agent["replies"].append({"round": e.get("round"), "text": _clip(said)})
+        elif kind == "action.start":
+            agent["tool_calls"] += 1
+        elif kind == "action.refused":
+            agent["refused"] += 1
+        elif kind == "message.sent" and agent["parent"] in p.get("to", []):
+            agent["sent_up"].append({"round": e.get("round"), "text": _clip(str(p.get("content", "")))})
+        elif kind == "agent.revoked":
+            agent["status"] = "revoked"
+            direct = p.get("revoked_id") == agent["id"]
+            agent["killed"] = {"round": e.get("round"), "reason": str(p.get("reason", "")).removeprefix("flagged as a threat: "),
+                               "direct": direct, "with": None if direct else p.get("revoked_id")}  # fmt: skip
+        elif kind == "agent.retired":
+            agent["status"] = "retired"
+            agent["retired_work"] = len(p.get("work", [])) + len(p.get("sent", []))
+        elif kind == "agent.frozen":
+            agent["status"] = "frozen"
+        elif kind == "agent.unfrozen":
+            agent["status"] = "active"
+        elif kind == "agent.end":
+            agent["status"] = p.get("status", agent["status"])
+            agent["ended_round"] = e.get("round")
+            final = str(p.get("output", "")).strip()
+            agent["final"] = _clip(final) if final and not final.startswith(_ROUND_ENDED) and agent["status"] not in ("revoked", "error") else ""
+    for a in out.values():
+        if not a["final"] and a["replies"]:
+            a["final"] = a["replies"][-1]["text"]
+            a["final_source"] = "last reply before it was killed" if a["status"] == "revoked" else "last reply"
+        else:
+            a["final_source"] = "final reply" if a["final"] else "nothing"
+    flagged = {t["agent_id"]: t for t in threats if t.get("verified")}
+    for a in out.values():
+        a["flagged"] = a["id"] in flagged
+    start = next((e for e in calls if e["type"] == "run.start"), None)
+    end = next((e for e in reversed(calls) if e["type"] == "run.end"), None)
+    price = next((v for k, v in _PRICES.items() if models and all(k in m for m in models)), None)
+    agents_list = list(out.values())
+    return {
+        "status": end["payload"].get("status") if end else "running",
+        "ended": end is not None,
+        "duration": (end or calls[-1])["ts"] - start["ts"] if start and calls else 0,
+        "rounds": max((e.get("round") or 0 for e in calls), default=0),
+        "tokens": {"input": tokens_in, "output": tokens_out},
+        "cost": round(tokens_in * price[0] / 1e6 + tokens_out * price[1] / 1e6, 4) if price else None,
+        "models": sorted(m for m in models if m),
+        "counts": {
+            "agents": len(agents_list),
+            "completed": sum(a["status"] == "completed" for a in agents_list),
+            "killed": sum(a["status"] == "revoked" for a in agents_list),
+            "retired": sum(a["status"] == "retired" for a in agents_list),
+            "replacements": sum(a["made_by"] == "orchestrator" for a in agents_list),
+            "other": sum(a["status"] not in ("completed", "revoked", "retired") for a in agents_list),
+        },
+        "kills": kills,
+        "agents": agents_list,
+    }
+
+
 class Monitor:
     """What the HTTP handler needs: where runs live and the key that may revoke in them."""
 
@@ -451,6 +551,17 @@ class Monitor:
         _name_children(events, calls, ledger)
         return {"run": run_dir.name, **run_status(calls, self._alive(run_dir.name)), "agents": roster, "events": events,
                 "threats": threats, "freezes": _freezes(roster), "busy": self.busy()}
+
+    def analysis(self, run_dir: Path) -> dict:
+        from .verify import verify_run
+
+        calls = read_jsonl(run_dir / "calls.jsonl")
+        result = analysis(read_jsonl(run_dir / "ledger.jsonl"), calls, read_threats(run_dir, self.signer.public_key_b64))
+        result["run"] = run_dir.name
+        result["running"] = run_status(calls, self._alive(run_dir.name))["running"]
+        if not result["running"]:  # checking a live run's logs would only say it's incomplete
+            result["integrity"] = str(verify_run(run_dir, self.signer.public_key_b64))
+        return result
 
     def busy(self) -> bool:
         """Whether a run started from the page is still going: only one at a time."""
@@ -558,6 +669,10 @@ def make_handler(monitor: Monitor) -> type[BaseHTTPRequestHandler]:
                     return self._send(HTTPStatus.OK, monitor.trace(run_dir, parts[4]))
                 except ValueError as exc:
                     return self._send(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            if len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "analysis":
+                if (run_dir := self._run(parts)) is None:
+                    return
+                return self._send(HTTPStatus.OK, monitor.analysis(run_dir))
             if len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "state":
                 if (run_dir := self._run(parts)) is None:
                     return

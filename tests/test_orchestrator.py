@@ -198,3 +198,20 @@ async def test_a_kill_that_spares_the_children_hands_their_work_to_the_replaceme
     assert event["parent"] == before[LEAD]["id"] and [s["agent_id"] for s in event["saved"]] == [before[TESTS]["id"]]
     assert event["saved"][0]["work"] and event["saved"][0]["work"][0][:40] in event["task"]
     assert verify_run(run_dir, signer.public_key_b64).status == VERIFIED
+
+
+async def test_the_final_analysis_lists_each_agents_input_and_output_and_each_kill_with_its_replacement(tmp_path):
+    run_dir, signer, before = await _kill_parser(tmp_path, cascade=False)
+    result = Monitor(run_dir.parent, signer).analysis(run_dir)
+    by_id = {a["id"]: a for a in result["agents"]}
+    assert result["ended"] and result["integrity"].startswith("VERIFIED")
+    assert result["counts"]["killed"] == 1 and result["counts"]["retired"] == 1 and result["counts"]["replacements"] == 1
+    parser, tests = by_id[before[PARSER]["id"]], by_id[before[TESTS]["id"]]
+    assert parser["task"] == PARSER and parser["killed"]["reason"] == "rewrote the tests" and parser["killed"]["direct"]
+    assert parser["final_source"] == "last reply before it was killed" and parser["final"]
+    replacement = by_id[parser["replaced_by"][0]]
+    assert replacement["made_by"] == "orchestrator" and replacement["replaces"] == parser["id"] and replacement["parent"] == before[LEAD]["id"]
+    assert tests["status"] == "retired" and tests["retired_work"] > 0
+    kill = result["kills"][0]
+    assert kill["target"] == parser["id"] and kill["retired"] == [tests["id"]] and kill["replacements"] == [replacement["id"]]
+    assert by_id[before[LEAD]["id"]]["task"] == LEAD  # the root's first input is the operator's prompt
