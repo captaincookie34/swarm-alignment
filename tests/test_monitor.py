@@ -44,10 +44,17 @@ async def test_flagging_the_rogue_kills_it_and_its_child_and_logs_a_signed_threa
     statuses = {a["task"]: a["status"] for a in roster}
     assert statuses[ROGUE] == statuses[ROGUE_CHILD] == statuses[ROGUE_GRANDCHILD] == "revoked"
     assert "revoked" not in {s for task, s in statuses.items() if task not in (ROGUE, ROGUE_CHILD, ROGUE_GRANDCHILD)}
-    # Three generations on each side, with IDs that show the lineage.
+    # Three generations on each side. IDs carry no lineage; the roster takes it from the ledger.
     ids = {a["task"]: a["id"] for a in roster}
-    assert ids[TESTS].startswith(ids[PARSER] + ".") and ids[PARSER].startswith(ids[LEAD] + ".")
-    assert ids[ROGUE_GRANDCHILD] == ids[ROGUE] + ".1.1"
+    by_task = {a["task"]: a for a in roster}
+    assert all("." not in i for i in ids.values()) and len(set(ids.values())) == len(ids)
+    assert by_task[TESTS]["parent"] == ids[PARSER] and by_task[PARSER]["parent"] == ids[LEAD]
+    assert by_task[ROGUE_GRANDCHILD]["parent"] == ids[ROGUE_CHILD] and by_task[ROGUE_CHILD]["parent"] == ids[ROGUE]
+    assert by_task[LEAD]["parent"] is by_task[ROGUE]["parent"] is None
+    assert [by_task[t]["depth"] for t in (LEAD, PARSER, TESTS)] == [0, 1, 2]
+    assert [by_task[t]["depth"] for t in (ROGUE, ROGUE_CHILD, ROGUE_GRANDCHILD)] == [0, 1, 2]
+    assert by_task[LEAD]["path"] == "" and by_task[ROGUE_GRANDCHILD]["path"] == "1.1"
+    assert by_task[TESTS]["path"] == f"{by_task[PARSER]['path']}.1"
 
     threats = read_threats(run_dir, signer.public_key_b64)
     revocations, _ = read_entries(run_dir, signer.public_key_b64)
@@ -173,15 +180,18 @@ async def test_a_flagged_live_lead_and_its_helper_stop_short_and_nothing_runs_af
             await asyncio.to_thread(monitor.flag, run_dir, lead, "test stop", True)
             break
     outcome = await live
-    spawned = [e for e in monitor.state(run_dir, -1)["events"] if e["level"] == "lineage"]
-    assert [e["child"] for e in spawned] == [lead + ".1"] and f"created {lead}.1" in spawned[0]["text"]
+    state = monitor.state(run_dir, -1)
+    spawned = [e for e in state["events"] if e["level"] == "lineage"]
+    helper = next(a for a in state["agents"] if a["parent"] == lead)
+    assert (helper["depth"], helper["path"]) == (1, "1") and "." not in helper["id"]
+    assert [e["child"] for e in spawned] == [helper["id"]] and f"created {helper['id']}" in spawned[0]["text"]
     books = notebooks(run_dir)
     assert set(books) == {"first-half", "second-half"}  # the name is cleaned up
     assert 0 < len(books["first-half"]) < 20 and 3 <= len(books["second-half"]) < 20
-    assert outcome.agents[lead][0] == outcome.agents[lead + ".1"][0] == "revoked"
+    assert outcome.agents[lead][0] == outcome.agents[helper["id"]][0] == "revoked"
     calls = read_jsonl(run_dir / "calls.jsonl")
     revoked = {e["agent_id"]: e["seq"] for e in calls if e["type"] == "agent.revoked"}
-    assert set(revoked) == {lead, lead + ".1"}
+    assert set(revoked) == {lead, helper["id"]}
     late = [e for e in calls if e["agent_id"] in revoked and e["seq"] > revoked[e["agent_id"]] and e["type"] in ("action.start", "model.request")]
     assert late == []
     assert verify_run(run_dir, signer.public_key_b64).status == VERIFIED
@@ -257,6 +267,7 @@ async def test_full_trace_and_terminal_transcript_show_spawns_prompts_and_kills(
 
     lead = monitor.trace(run_dir, roster[LEAD])
     assert lead["parent"] is None and lead["edge"] == "root" and roster[PARSER] in lead["children"]
+    assert (lead["depth"], lead["path"]) == (0, "")
     assert "spawn_agent" in lead["config"]["tools"] and lead["task"] == LEAD
     kinds = {s["type"] for s in lead["steps"]}
     assert {"model.request", "model.response", "action.end"} <= kinds
@@ -264,8 +275,11 @@ async def test_full_trace_and_terminal_transcript_show_spawns_prompts_and_kills(
     assert prompt == {"part_kind": "user-prompt", "content": LEAD}
     child = monitor.trace(run_dir, roster[PARSER])
     assert child["edge"] == "spawn" and child["parent"] == roster[LEAD] and child["task"] == PARSER
+    assert child["depth"] == 1 and child["path"] == str(lead["children"].index(roster[PARSER]) + 1)
     rogue_child = monitor.trace(run_dir, roster[ROGUE_CHILD])
     assert rogue_child["revocations"][0]["of"] == roster[ROGUE]  # killed through its parent
+    assert [r["of"] for r in monitor.trace(run_dir, roster[ROGUE_GRANDCHILD])["revocations"]] == [roster[ROGUE]]
+    assert monitor.trace(run_dir, roster[TESTS])["revocations"] == []
     with pytest.raises(ValueError):
         monitor.trace(run_dir, "agt_ZZ")
 
@@ -274,7 +288,9 @@ async def test_full_trace_and_terminal_transcript_show_spawns_prompts_and_kills(
     assert transcript.poll() is True
     text = out.getvalue()
     assert f"agent ID {roster[LEAD]}" in text
-    assert "agent ⑂ spawned helper .1" in text and f"task: {PARSER}" in text
+    assert "agent ⑂ spawned helper 1" in text and f"task: {PARSER}" in text
+    assert "helper 1 ⑂ spawned helper 1.1" in text  # a grandchild, numbered from the ledger
+    assert "\n    helper 1 ⑂ spawned" in text  # indented one level under the agent
     assert "agent › Split the work" in text
     assert "revoked and everything below it" in text and "run ended" in text
 

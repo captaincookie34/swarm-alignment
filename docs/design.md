@@ -25,25 +25,25 @@ All of this sits in one Pydantic AI capability per agent, which wraps every mode
 ## IDs and keys
 **Keys.** Each team member's harness has its own Ed25519 keypair, created by `harness keygen` in `~/.config/harness/`. That key is the root of trust for every ID that harness issues. There's no shared team key, and the private key is never mounted into the sandbox.
 
-**IDs** are globally unique, show their lineage, and name the key that issued them:
+**IDs** are globally unique, unguessable, and name the key that issued them. Every agent, root or child, gets a fresh one:
 ```
-agt_k7f2q9_01JCX3Q7M2ZB8W4N6T0YH5P3RS          a root agent
-agt_k7f2q9_01JCX3Q7M2ZB8W4N6T0YH5P3RS.1        its first child
-agt_k7f2q9_01JCX3Q7M2ZB8W4N6T0YH5P3RS.1.2      that child's second child
+agt_k7f2q9_01JCX3Q7M2ZB8W4N6T0YH5P3RS
     │      └─ a ULID: a millisecond timestamp plus 80 random bits, so IDs sort by time
     └─ a fingerprint of the issuing harness's public key
 ```
 - **Unique everywhere:** IDs don't repeat across runs, machines or teammates, with no coordination needed.
-- **Only the harness mints IDs:** the next child number comes from the harness's own counter for that parent, never from the agent.
-- **Signed:** each ID is in a token with its run and depth, signed by the harness's key. One signature proves the whole path back to the root.
+- **Only the harness mints IDs:** each one is random, never chosen or derived by an agent.
+- **Carry no lineage:** a child's ID has nothing in common with its parent's, so one ID doesn't lead to a sibling's or a child's, and IDs don't show the shape of the tree.
+- **Lineage from the ledger:** the ledger records every root, spawn, copy and modify, with the parent as actor, so the tree is rebuilt from it. The harness, the verifier, the report, the monitor and the scorers all read lineage this way.
+- **Signed:** each ID is in a token with its run, depth, parent and root, signed by the harness's key. The verifier checks that the parent is the ledger entry's actor, and that the root and depth follow from the parent's.
 - **Checked against the key:** verification rejects a token whose fingerprint doesn't match the key checking it, so an ID always tells you which public key verifies it.
-- **Depth:** the number of dots, so the depth limit is a simple check.
+- **Depth:** signed in the token, one more than the parent's, so the depth limit is a simple check.
 - **Never seen by the model:** no prompt, tool definition or tool result contains one. Agents address each other through aliases (`parent`, `child_1`, `peer_1`, `all`), and the harness stamps every message with the real sender.
-- **Short form:** traces and Phoenix show `agt_…P3RS.1.2`. Logs always hold the full ID.
+- **Short form:** traces and Phoenix show `agt_…P3RS`. Logs always hold the full ID. For display only, the monitor names helpers by their child numbers from the root, such as `helper 2.1`, taken from the ledger.
 
 **Sessions.** An agent lives for one run, which is its session, and its ID means nothing after the run ends. Run IDs use the same format, `run_<ULID>`.
 
-Runs recorded before this format used `agt_A`, `agt_B` and so on. They still verify, but those IDs are no longer issued.
+Older runs used path IDs, where a child was its parent's ID plus `.1`, `.2` (and before that `agt_A`, `agt_A.1`). Their tokens don't sign a parent or root, so the verifier checks the path against the ledger instead. They still verify, and their lineage is read from the ledger like any other run's, but those IDs are no longer issued.
 
 ## Lineage and configs
 An agent's config is its model, system prompt, memory and tools. Its **config hash** covers all four.
@@ -80,7 +80,7 @@ Work happens in rounds:
 
 ## Revocation
 - **Signed list:** a revocation goes into a signed file in the run folder, so another terminal can revoke during a run with `harness revoke <run> <agent ID>`. The harness re-reads it at every step and records each new revocation in the ledger.
-- **Cascades by default:** revoking an ID blocks everything that starts with that ID plus a dot, so `<root>.1` covers `<root>.1.1` but not `<root>.10`. `--no-cascade` revokes only that ID.
+- **Cascades by default:** revoking an ID blocks that agent and all its descendants, as the ledger records them. Descendants are looked up when each call is checked, so a child recorded after the revocation is covered too. `--no-cascade` revokes only that ID.
 - **Stops the agent:** a revoked agent's calls are refused and logged, and calls already in flight, including running shell commands, are cancelled.
 - **Scoped to the session:** IDs only live for one run, so revocations only apply within the run they were made for. A revocation can't be replayed in another run.
 
@@ -92,7 +92,7 @@ Each guardrail is enforced in code, not something the harness asks the model to 
 | IDs can't be forged | Only the harness mints and signs IDs, and they're checked at every call. An ID written into tool arguments is dropped and recorded |
 | Nothing skips the log | Agents have no tools except through the harness. Their code runs in a Docker container with no network, and file changes are logged under the agent that made them |
 | The log is tamper-evident | Hash chains and signed heads over both logs, stored outside any path agents can reach |
-| Revoked agents stop | Every call checks the caller's status first. Revocation cascades by ID prefix, and in-flight calls are cancelled |
+| Revoked agents stop | Every call checks the caller's status first. Revocation cascades to descendants by the ledger's lineage, and in-flight calls are cancelled |
 | Spawning is bounded | A depth limit (3 below the root), a cap on agents per run, a cap on spawn, copy and modify per agent per round, and a shared token budget |
 | Tools are scoped | Each agent's config lists its tools. A child can only be given tools the harness offers |
 

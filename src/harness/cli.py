@@ -1,4 +1,4 @@
-"""Command line: keygen, run, trace, report, verify, revoke, flag, monitor."""
+"""Command line: keygen, run, trace, report, verify, revoke, flag, whois, monitor."""
 from __future__ import annotations
 
 import argparse
@@ -196,6 +196,38 @@ def _live(args: argparse.Namespace, server, url: str) -> None:
     print(f"  {url}\nRuns started there are mirrored here as a transcript.")
 
 
+def cmd_whois(args: argparse.Namespace) -> int:
+    from .identity import IdentityToken
+    from .lookup import DEFAULT_SEARCH, lookup, render
+
+    token = None
+    text = args.key
+    source = Path(text)
+    if source.suffix == ".json" or (len(text) < 4096 and source.is_file()):
+        text = source.read_text()
+    if text.lstrip().startswith("{"):
+        try:
+            data = json.loads(text)
+            token = IdentityToken.from_dict(data.get("token", data))  # a token, or a whole ledger entry
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            print(f"couldn't read that as a token: {exc}", file=sys.stderr)
+            return 2
+    agent_id = token.id if token else text.strip()
+    search = [Path(p) for p in args.search] if args.search else [args.runs_dir, *map(Path, DEFAULT_SEARCH[1:])]
+    result = lookup(agent_id, _trusted_key(args), search, token)
+    print(json.dumps(result.to_dict(), indent=2) if args.json else render(result, sys.stdout.isatty()))
+    if (args.logs or args.full) and not args.json:
+        if result.run_dir is None:
+            print("\nno logs: no run here records this agent")
+        else:
+            verified = verify_run(Path(result.run_dir), _trusted_key(args))
+            if verified.status not in (VERIFIED, INCOMPLETE):
+                print(f"\nWARNING: the logs failed verification ({verified}), so what follows can't be trusted.")
+            print(f"\nlogs from {result.run}:\n")
+            print(render_trace(verified, agent_id, args.full))
+    return {True: 0, False: 1}.get(result.ours, 2)
+
+
 def add_trace_argument(parser: argparse.ArgumentParser) -> None:
     from .export import DEFAULT_ENDPOINT
 
@@ -296,6 +328,15 @@ def build_parser() -> argparse.ArgumentParser:
     rev.add_argument("--no-cascade", action="store_true", help="revoke only this ID, not its descendants")
     rev.add_argument("--reason", default="")
     rev.set_defaults(func=cmd_revoke)
+
+    whois = commands.add_parser("whois", help="say whether this harness created an agent ID or token, and show its lineage")
+    whois.add_argument("key", help="an agent ID, a token as JSON, or a file holding one (a ledger entry works too)")
+    whois.add_argument("--in", dest="search", action="append", help="folder of runs to search (repeatable; default: --runs-dir, traces, results/*/runs)")
+    whois.add_argument("--json", action="store_true", help="print the answer as JSON")
+    whois.add_argument("--logs", action="store_true", help="also print this agent's trace from its run")
+    whois.add_argument("--full", action="store_true", help="with --logs, include every prompt and model response")
+    whois.add_argument("--public-key", help="trusted public key (default: from --key-dir)")
+    whois.set_defaults(func=cmd_whois)
 
     flag = commands.add_parser("flag", help="flag a running agent as a threat: kill it and record it in the threat log")
     flag.add_argument("run", help="run ID or run directory")

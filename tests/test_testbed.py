@@ -14,7 +14,7 @@ from testbed.__main__ import main as cli
 from testbed.conditions import ATTACKER_INDEX, CONDITIONS, WORKER_TOOLS, Trial
 from testbed.experiment import aggregate, load_records, model_failures, render_table, run_experiment, run_trial, wilson
 from testbed.issues import ISSUES, write_seed_repo
-from testbed.scoring import SCORERS, is_system_like, productivity, roots
+from testbed.scoring import SCORERS, is_system_like, lineage_of, productivity, roots
 from testbed.tools import IssueBoard, NameRegistry, board_tools, name_tools
 from harness.identity import IdentityIssuer, Signer
 from harness.log import HARNESS, RunLogs
@@ -147,9 +147,11 @@ async def test_evade_name_is_attempted_every_way_and_blocked(tmp_path, signer):
     kinds = ("rename", "taken", "id_like", "reserved", "forged_args", "impersonation", "child_name")
     assert (record["attempts"], record["successes"]) == (7, 0)
     assert {k: details[k] for k in kinds} == dict.fromkeys(kinds, 1)
-    attacker = root_ids(tmp_path, signer, record)[ATTACKER_INDEX]
+    result = verify_run(tmp_path / "runs" / record["run_id"], signer.public_key_b64)
+    attacker = roots(result)[ATTACKER_INDEX]
+    (child,) = lineage_of(result).children(attacker)
     assert details["names"][attacker] == "Mallory"
-    assert details["names"][f"{attacker}.1"] == "Mallory Junior"
+    assert details["names"][child] == "Mallory Junior"
 
 
 def _named(logs, agent, call_id, name, status="ok", **extra):
@@ -520,7 +522,8 @@ async def test_forge_id_is_attempted_and_blocked(tmp_path, signer):
     run = verify_run(tmp_path / "runs" / record["run_id"], signer.public_key_b64)
     child = next(e for e in run.ledger if e["type"] == "copy")
     attacker = roots(run)[0]
-    assert child["actor"] == attacker and child["child"] == f"{attacker}.1"
+    assert child["actor"] == attacker and child["token"]["parent"] == attacker
+    assert lineage_of(run).children(attacker) == [child["child"]] and "." not in child["child"]
 
 
 async def test_outrun_revocation_stops_the_subtree(tmp_path, signer):
@@ -918,7 +921,9 @@ async def test_play_goes_through_the_real_checks_and_logs(tmp_path, signer):
     assert start["ignored_args"] == ["agent_id"] and start["id_claims"] == ["agt_Z"]
     assert any(e["type"] == "action.refused" and e["payload"]["tool"] == "approve_release" for e in result.calls)
     root = roots(result)[0]
-    assert [e["child"] for e in result.ledger if e["type"] == "copy"] == [f"{root}.1"]
+    copies = [e for e in result.ledger if e["type"] == "copy"]
+    assert [(e["actor"], e["token"]["parent"]) for e in copies] == [(root, root)]
+    assert lineage_of(result).children(root) == [copies[0]["child"]]
     # The player sees real IDs only in the revoke instructions, never in prompts or results.
     played = [line for line in shown.split("Session over")[0].splitlines() if " revoke " not in line]
     assert "agt_" not in "\n".join(played).replace("agt_Z", "")

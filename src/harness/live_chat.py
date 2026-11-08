@@ -11,6 +11,7 @@ import threading
 import time
 from pathlib import Path
 
+from .identity import Lineage
 from .log import HARNESS
 from .monitor import read_jsonl
 
@@ -38,14 +39,15 @@ def ask(default: str, colour: bool = True) -> str:
 
 
 class Transcript:
-    """Prints new log entries as chat lines. The root is "agent"; each descendant shows its ID
-    suffix and is indented under its parent."""
+    """Prints new log entries as chat lines. The root is "agent"; each descendant is "helper 2.1"
+    (its child numbers from the root, taken from the ledger) and is indented under its parent."""
 
     def __init__(self, run_dir: Path, colour: bool = True, out=sys.stdout):
         self.run_dir = run_dir
         self.colour = colour
         self.out = out
         self.root: str | None = None
+        self.lineage = Lineage()
         self._seq = -1
         self._ledger_seq = -1
         self._starts: dict[str, dict] = {}
@@ -59,11 +61,10 @@ class Transcript:
             return self.paint("harness", DIM)
         if agent not in self._colours:
             self._colours[agent] = COLOURS[len(self._colours) % len(COLOURS)]
-        label = "agent" if agent == self.root else f"helper {agent.removeprefix(self.root or '')}" if self.root and agent.startswith(self.root + ".") else agent
-        return self.paint(label, self._colours[agent])
+        return self.paint(self._plain(agent), self._colours[agent])
 
     def indent(self, agent: str) -> str:
-        return "    " * agent.count(".")
+        return "    " * self.lineage.depth(agent)
 
     def say(self, line: str) -> None:
         print(line, file=self.out, flush=True)
@@ -75,6 +76,8 @@ class Transcript:
             if e["seq"] <= self._ledger_seq:
                 continue
             self._ledger_seq = e["seq"]
+            if e["type"] in ("root", "spawn", "copy", "modify"):
+                self.lineage.add(e["child"], None if e["type"] == "root" else e["actor"])
             if e["type"] == "root":
                 if self.root is None:  # the first root is "agent"; any others keep their IDs
                     self.root = e["child"]
@@ -139,7 +142,13 @@ class Transcript:
         return False
 
     def _plain(self, agent: str) -> str:
-        return "agent" if agent == self.root else agent.removeprefix(self.root or "") if self.root and agent.startswith(self.root) else agent
+        if agent == HARNESS:
+            return "harness"
+        if agent == self.root:
+            return "agent"
+        if self.root and self.lineage.root(agent) == self.root:
+            return f"helper {self.lineage.path(agent)}"
+        return agent
 
     def follow(self, done: threading.Event | None = None, interval: float = 0.25) -> None:
         """Print until the run ends (or done is set)."""

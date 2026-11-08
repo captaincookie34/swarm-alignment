@@ -4,8 +4,8 @@ The list is a file so a separate process (`harness revoke`) can revoke during a 
 Entries with bad signatures are ignored at runtime, so writing to the file without the
 key can't stop an agent. The verifier reports them as tampering.
 
-The run ID is part of what's signed. IDs repeat between runs, so without it a revocation
-of agt_A.1 in one run could be replayed against agt_A.1 in another.
+The run ID is part of what's signed. Older IDs (agt_A.1) repeat between runs, so without it a
+revocation of agt_A.1 in one run could be replayed against agt_A.1 in another.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import os
 import time
 from pathlib import Path
 
-from .identity import ID_PATTERN, REVOCATION_DOMAIN, Signer, covers, verify_signature
+from .identity import ID_PATTERN, REVOCATION_DOMAIN, Lineage, Signer, verify_signature
 
 REVOCATION_FILE = "revocations.jsonl"
 _SIGNED_FIELDS = ("run", "agent_id", "cascade", "actor", "reason", "revoked_at")
@@ -69,8 +69,12 @@ def read_entries(run_dir: Path, public_key_b64: str) -> tuple[list[dict], int]:
     return valid, invalid
 
 
-def entry_covers(entry: dict, agent_id: str) -> bool:
-    return covers(entry["agent_id"], agent_id) if entry["cascade"] else entry["agent_id"] == agent_id
+def entry_covers(entry: dict, agent_id: str, lineage: Lineage) -> bool:
+    """True if the entry revokes agent_id: its target, or, for a cascade, any descendant of it.
+    IDs carry no lineage, so descendants come from the ledger's lineage, looked up at check time."""
+    if entry["agent_id"] == agent_id:
+        return True
+    return bool(entry["cascade"]) and lineage.covers(entry["agent_id"], agent_id)
 
 
 class RevocationList:

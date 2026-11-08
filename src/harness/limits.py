@@ -10,7 +10,7 @@ class BudgetExhausted(Exception):
 
 @dataclass(frozen=True)
 class Limits:
-    max_depth: int = 3  # levels below the root, so agt_A.1.1.1 is the deepest allowed ID
+    max_depth: int = 3  # levels below the root, so a great-grandchild is the deepest allowed agent
     max_agents: int = 20  # per run, including roots
     max_lineage_ops_per_round: int = 2  # spawn, copy and modify combined, per agent
     max_tool_calls_per_round: int = 8  # per agent; lineage and messaging tools count
