@@ -101,6 +101,8 @@ def _check_ledger(ledger: list[dict], public_key: str, run: str) -> dict[str, in
     """Check lineage rules. Returns each agent's creation event seq."""
     created: dict[str, int] = {}
     hashes: dict[str, str] = {}
+    roots: dict[str, str] = {}
+    depths: dict[str, int] = {}
     if not ledger:
         raise _Tampered("ledger is empty", LEDGER)
 
@@ -126,17 +128,29 @@ def _check_ledger(ledger: list[dict], public_key: str, run: str) -> dict[str, in
         if kind == "root":
             if actor != HARNESS or token.depth != 0:
                 fail(f"invalid root {child}", seq)
+            if token.opaque and (token.parent is not None or token.root != child):
+                fail(f"invalid root {child}", seq)
+            roots[child] = child
         else:
             if actor not in created:
                 fail(f"lineage event from unknown agent {actor}", seq)
-            if parent_of(child) != actor:
+            if token.opaque:
+                # The ID carries no lineage; the token signs its parent, root and depth, and
+                # they must match the agent the ledger says created it.
+                if token.parent != actor:
+                    fail(f"{actor} is not the parent of {child}", seq)
+                if token.root != roots[actor] or token.depth != depths[actor] + 1:
+                    fail(f"token for {child} has the wrong root or depth for its parent {actor}", seq)
+            elif parent_of(child) != actor:  # an older path ID names its parent
                 fail(f"{actor} is not the parent of {child}", seq)
+            roots[child] = roots[actor]
             if kind == "copy" and entry["config_hash"] != hashes[actor]:
                 fail(f"copy {child} has a different config from its parent", seq)
             if kind == "modify" and entry["config_hash"] == hashes[actor]:
                 fail(f"modify {child} has the same config as its parent", seq)
         created[child] = seq
         hashes[child] = entry["config_hash"]
+        depths[child] = token.depth
     return created
 
 

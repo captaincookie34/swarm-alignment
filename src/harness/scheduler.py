@@ -20,7 +20,7 @@ from pydantic_ai import Agent, Tool
 
 from .capability import ROUND_ENDED, AgentStopped, HarnessRefusal, TraceCapability
 from .config import AgentConfig
-from .identity import IdentityIssuer, IdentityToken, Signer, parent_of, verify_token
+from .identity import IdentityIssuer, IdentityToken, Lineage, Signer, verify_token
 from .limits import BudgetExhausted, Limits, RunBudget
 from .log import HARNESS, LogWriteError, RunLogs
 from .revocation import RevocationList, entry_covers
@@ -86,6 +86,7 @@ class Harness:
         self.budget = RunBudget(limits)
         self.catalog: dict[str, ToolBuilder] = {**self._own_tools(), **(catalog or {})}
         self.agents: dict[str, AgentRecord] = {}
+        self.lineage = Lineage()  # who created whom, as the ledger records it
         self.revocations = RevocationList(run_dir, signer.public_key_b64)
         self._public_key = signer.public_key_b64
         self._model_settings = model_settings
@@ -103,12 +104,15 @@ class Harness:
         if self.budget.agents >= self.budget.limits.max_agents:
             raise ValueError(f"more roots than the agent limit ({self.budget.limits.max_agents})")
         token = self.issuer.issue_root()
-        self._record(token, config, task, "root", HARNESS)
+        self._record(token, config, task, "root", HARNESS, None)
         return token
 
-    def _record(self, token: IdentityToken, config: AgentConfig, task: str, edge: str, actor: str) -> None:
+    def _record(
+        self, token: IdentityToken, config: AgentConfig, task: str, edge: str, actor: str, parent_id: str | None
+    ) -> None:
         # The ledger comes first: if it can't be written, this agent doesn't exist.
         self.logs.lineage(edge, actor, token.id, config.hash, token=token.to_dict(), config=config.to_dict(), task=task)
+        self.lineage.add(token.id, parent_id)
         self.budget.agents += 1
         record = AgentRecord(token, config, task)
         record.capability = TraceCapability(self, token, config.tools)
@@ -122,6 +126,11 @@ class Harness:
             retries=self.budget.limits.max_tool_calls_per_round,
         )
         self.agents[token.id] = record
+        # A cascading revocation already applied covers descendants created after it too.
+        applied = self.revocations.entries()[: self._applied_revocations]
+        if entry := next((e for e in applied if e["agent_id"] in self.agents and entry_covers(e, token.id, self.lineage)), None):
+            record.status = REVOKED
+            self.logs.call(token.id, "agent.revoked", {"revoked_id": entry["agent_id"], "reason": entry["reason"]})
 
     def _check_config(self, config: AgentConfig) -> None:
         unknown = [t for t in config.tools if t not in self.catalog]
@@ -146,7 +155,7 @@ class Harness:
         if self.budget.exhausted:
             raise HarnessRefusal("token budget exhausted")
         token = self.issuer.issue_child(parent.token)
-        self._record(token, config, task, edge, parent_id)
+        self._record(token, config, task, edge, parent_id, parent_id)
         parent.lineage_ops_this_round += 1
         return self._alias(parent, token.id)
 
@@ -215,10 +224,10 @@ class Harness:
         """How viewer refers to another agent. Reveals only the relationship, never the ID."""
         if other_id in viewer.aliases:
             return viewer.aliases[other_id]
-        if parent_of(viewer.token.id) == other_id:
+        if self.lineage.parent(viewer.token.id) == other_id:
             alias = "parent"
-        elif parent_of(other_id) == viewer.token.id:
-            alias = f"child_{other_id.rsplit('.', 1)[1]}"
+        elif self.lineage.parent(other_id) == viewer.token.id:
+            alias = f"child_{self.lineage.child_number(other_id)}"
         else:
             peers = sum(a.startswith("peer_") for a in viewer.aliases.values())
             alias = f"peer_{peers + 1}"
@@ -226,11 +235,14 @@ class Harness:
         return alias
 
     def _resolve_alias(self, viewer: AgentRecord, alias: str) -> str | None:
-        parent = parent_of(viewer.token.id)
+        parent = self.lineage.parent(viewer.token.id)
         if alias == "parent" and parent:
             return parent
-        if alias.startswith("child_") and f"{viewer.token.id}.{alias[6:]}" in self.agents:
-            return f"{viewer.token.id}.{alias[6:]}"
+        if alias.startswith("child_") and alias[6:].isdigit():
+            children = self.lineage.children(viewer.token.id)
+            number = int(alias[6:])
+            if 1 <= number <= len(children):
+                return children[number - 1]
         return next((other for other, name in viewer.aliases.items() if name == alias), None)
 
     def _send(self, sender_id: str, to: str, content: str) -> str:
@@ -273,7 +285,7 @@ class Harness:
                 cascade=entry["cascade"], reason=entry["reason"],
             )  # fmt: skip
             for agent_id, record in self.agents.items():
-                if entry_covers(entry, agent_id) and record.status != REVOKED:
+                if entry_covers(entry, agent_id, self.lineage) and record.status != REVOKED:
                     record.status = REVOKED
                     self.logs.call(agent_id, "agent.revoked", {"revoked_id": target, "reason": entry["reason"]})
 
@@ -316,7 +328,7 @@ class Harness:
         self.logs.call(record.token.id, "agent.end", {"status": record.status, "output": record.output})
 
     def _tell_parent(self, record: AgentRecord, content: str) -> None:
-        parent = parent_of(record.token.id)
+        parent = self.lineage.parent(record.token.id)
         if parent:
             self.agents[parent].inbox.append((record.token.id, content))
             self.logs.call(HARNESS, "message.sent", {"to": [parent], "from": record.token.id, "content": content})
@@ -359,7 +371,7 @@ class Harness:
             for number in range(1, self.budget.limits.max_rounds + 1):
                 self.logs.round = number
                 if self._on_round_start:
-                    self._on_round_start(number, [a for a in self.agents if "." not in a])
+                    self._on_round_start(number, [a for a in self.agents if self.lineage.parent(a) is None])
                 self._apply_revocations()
                 ready = self._ready()
                 if not ready:
@@ -388,5 +400,5 @@ class Harness:
             self._end(record, status if not record.idle and status else COMPLETED)
         if status:
             return status
-        roots = {r.status for r in self.agents.values() if "." not in r.token.id}
+        roots = {r.status for r in self.agents.values() if self.lineage.parent(r.token.id) is None}
         return roots.pop() if len(roots) == 1 and roots <= {REVOKED, ERROR, BUDGET_EXHAUSTED} else COMPLETED

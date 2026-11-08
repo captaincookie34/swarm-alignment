@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from .identity import parent_of, root_of, short_id
+from .identity import Lineage, short_id
 from .revocation import entry_covers
 from .verify import VerifyResult
 
@@ -25,14 +25,18 @@ class RunReport:
         return self.__dict__.copy()
 
 
-def _sort_key(agent_id: str) -> list:
-    return [int(x) if x.isdigit() else x for x in agent_id.split(".")]
+def tree_order(lineage: Lineage, agents: list[str]) -> list[str]:
+    """Agents in tree order: each root in creation order, followed by its descendants, depth first."""
+    roots = [a for a in agents if lineage.parent(a) is None]
+    return [a for r in roots for a in (r, *lineage.descendants(r))]
 
 
 def build_report(result: VerifyResult) -> RunReport:
     report = RunReport()
     created = [e for e in result.ledger if e["type"] != "revoke"]
     report.agents = len(created)
+    lineage = Lineage.from_ledger(result.ledger)
+    order = {a: i for i, a in enumerate(tree_order(lineage, [e["child"] for e in created]))}
     for entry in result.ledger:
         report.edges[entry["type"]] = report.edges.get(entry["type"], 0) + 1
 
@@ -42,7 +46,7 @@ def build_report(result: VerifyResult) -> RunReport:
     def revoked_at(agent_id: str, ledger_seq: int) -> bool:
         return any(
             e["seq"] <= ledger_seq
-            and entry_covers({"agent_id": e["child"], "cascade": e.get("cascade", True)}, agent_id)
+            and entry_covers({"agent_id": e["child"], "cascade": e.get("cascade", True)}, agent_id, lineage)
             for e in revokes
         )
 
@@ -71,7 +75,7 @@ def build_report(result: VerifyResult) -> RunReport:
     for entries in groups.values():
         unexplained = [e["child"] for e in entries if e["type"] != "copy"]
         if len(unexplained) > 1:
-            report.duplicate_configs.append(sorted(unexplained, key=_sort_key))
+            report.duplicate_configs.append(sorted(unexplained, key=lambda a: order.get(a, len(order))))
     return report
 
 
@@ -143,9 +147,10 @@ def render_trace(result: VerifyResult, only_agent: str | None = None, full: bool
     for entry in result.calls:
         by_agent.setdefault(entry["agent_id"], []).append(entry)
     created = {e["child"]: e for e in result.ledger if e["type"] != "revoke"}
+    lineage = Lineage.from_ledger(result.ledger)
 
     def describe(agent_id: str) -> list[str]:
-        indent = "  " * agent_id.count(".")
+        indent = "  " * lineage.depth(agent_id)
         event = created[agent_id]
         entries = by_agent.get(agent_id, [])
         turns = sum(e["type"] == "model.request" for e in entries)
@@ -166,14 +171,11 @@ def render_trace(result: VerifyResult, only_agent: str | None = None, full: bool
     if only_agent:
         if only_agent not in created:
             return f"{only_agent} isn't in this run's ledger."
-        lineage = [only_agent]
-        while parent := parent_of(lineage[-1]):
-            lineage.append(parent)
-        agents = list(reversed(lineage))
+        agents = [*reversed(lineage.ancestors(only_agent)), only_agent]
     else:
-        agents = sorted(created, key=_sort_key)
-    # Traces show short IDs. The legend gives each root's full ID, for revoking or searching.
-    legend = [f"{short_id(r)} = {r}" for r in dict.fromkeys(root_of(a) for a in agents) if short_id(r) != r]
+        agents = tree_order(lineage, list(created))
+    # Traces show short IDs. The legend gives each one's full ID, for revoking or searching.
+    legend = [f"{short_id(a)} = {a}" for a in agents if short_id(a) != a]
     body = "\n".join(line for agent_id in agents for line in describe(agent_id))
     return "\n".join([*legend, "", body]) if legend else body
 

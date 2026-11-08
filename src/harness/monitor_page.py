@@ -202,7 +202,7 @@ pre.block { margin: 4px 0 0; padding: 8px 10px; background: var(--bg); border: 1
   <section id="agents-panel">
     <h2>Agents and lineage <span class="count" id="agent-count"></span></h2>
     <div class="legend">Each ID is issued and signed by the harness, and agents never see their own:
-      <code><span class="idk">agt_&lt;key&gt;_</span><span class="idr">&lt;root's unique ID&gt;</span><span class="idp">.child.grandchild</span></code></div>
+      <code><span class="idk">agt_&lt;key&gt;_</span><span class="idr">&lt;unique ID&gt;</span></code>. IDs say nothing about lineage: who created whom comes from the signed ledger.</div>
     <div class="scroll" id="agents"><div class="empty">No run yet. Type a prompt on the right and press Enter, or start one with <code>harness run</code> in a terminal.</div></div>
   </section>
   <section id="feed-panel">
@@ -261,8 +261,8 @@ const colour = (id) => {
   if (!(id in colours)) colours[id] = COLOURS[Object.keys(colours).length % COLOURS.length];  // one colour per agent
   return colours[id];
 };
-// agt_<fingerprint>_<ULID>.1.2 is long, so show the end of the ULID and the path.
-// agt_<key fingerprint>_<root's unique ID>, then .N for each generation below the root.
+// agt_<key fingerprint>_<ULID> is long, so show the end of the ULID. Every agent has its own ULID;
+// only older runs add a .1.2 path after it, which is kept.
 const idParts = (id) => { const m = /^(agt_[^_]+_)([0-9A-Z]{26})((?:\.\d+)*)$/.exec(id); return m ? {key: m[1], root: m[2], path: m[3]} : null; };
 const short = (id) => { const p = idParts(id); return p ? `agt_…${p.root.slice(-4)}${p.path}` : id; };
 const fullId = (id) => { const p = idParts(id); return p ? `<span class="idk">${esc(p.key)}</span><span class="idr">${esc(p.root)}</span><span class="idp">${esc(p.path)}</span>` : esc(id); };
@@ -281,7 +281,10 @@ function tree(list) {
   walk("", []);
   return out;
 }
-const descendants = (id, activeOnly) => state.agents.filter((a) => a.id.startsWith(id + ".") && (!activeOnly || a.status === "active"));
+const agentById = (id) => state && state.agents.find((a) => a.id === id);
+// Lineage comes from each agent's parent, as the ledger records it; IDs carry none.
+const isUnder = (id, ancestor) => { for (let a = agentById(id); a && a.parent; a = agentById(a.parent)) if (a.parent === ancestor) return true; return false; };
+const descendants = (id, activeOnly) => state.agents.filter((a) => isUnder(a.id, id) && (!activeOnly || a.status === "active"));
 const clock = (ts) => new Date(ts * 1000).toLocaleTimeString([], {hour12: false});
 const ago = (ts) => { const s = Math.max(0, Date.now() / 1000 - ts); return s < 60 ? `${s.toFixed(0)}s ago` : `${(s / 60).toFixed(0)}m ago`; };
 
@@ -365,11 +368,11 @@ function speaker(id) {
   const r = rootAgent();
   if (id === "harness") return "harness";
   if (r && id === r.id) return "agent";
-  if (r && id.startsWith(r.id + ".")) return `helper ${id.slice(r.id.length)}`;
+  if (r && isUnder(id, r.id)) return `helper ${agentById(id).path}`;
   return short(id);
 }
 function convoRow(e) {
-  const who = e.agent_id, depth = who === "harness" ? 0 : who.split(".").length - 1;
+  const who = e.agent_id, depth = (agentById(who) || {}).depth || 0;
   const name = (id) => `<span class="cname" style="color:${colour(id)}" data-pick="${esc(id)}" title="Highlight ${esc(id)}">${esc(speaker(id))}</span>`;
   const involved = [who, ...(e.to || []), ...(e.child ? [e.child] : [])].join(" ");
   const row = (cls, inner) => `<div class="c ${cls}" data-agents="${esc(involved)}" style="--who:${colour(who)};margin-left:${depth * 30}px">${inner}</div>`;
@@ -513,7 +516,7 @@ function step(cls, who, head, body = "") {
 }
 function renderTrace(t) {
   const c = t.config || {}, me = t.id;
-  $("drawer-title").innerHTML = `<span style="color:${colour(me)}">${esc(generation(me.split(".").length - 1))}</span> <span style="font-family:var(--mono);font-size:13px">${fullId(me)}</span>`;
+  $("drawer-title").innerHTML = `<span style="color:${colour(me)}">${esc(generation(t.depth || 0))}</span> <span style="font-family:var(--mono);font-size:13px">${fullId(me)}</span>`;
   const origin = t.parent ? `${esc(t.edge)} by <span style="color:${colour(t.parent)};font-family:var(--mono)">${fullId(t.parent)}</span> in round ${t.created_round}` : "root, started by the operator";
   let html = `<div class="tsec"><h4>Created</h4><div class="kv">
     <span>how</span><span>${origin}</span>

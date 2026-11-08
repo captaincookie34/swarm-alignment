@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from harness.cli import main as cli_main
-from harness.identity import short_id
+from harness.identity import Lineage, short_id
 from harness.runner import RootSpec, run_agents
 from harness.sandbox import DockerSandbox, diff_snapshots, parse_snapshot
 from harness.scripted import ScriptedModel, call, say
@@ -24,6 +24,12 @@ from harness.verify import VERIFIED, verify_run
 
 async def go(task, model, runs_dir, signer, **options):
     return await run_agents([RootSpec(task)], model, runs_dir, signer, **options)
+
+
+def children(run_dir, parent):
+    """A parent's children in creation order, from the ledger: IDs carry no lineage."""
+    ledger = [json.loads(line) for line in (run_dir / "ledger.jsonl").read_text().splitlines()]
+    return Lineage.from_ledger(ledger).children(parent)
 
 
 def of_type(entries, *types):
@@ -124,8 +130,8 @@ async def test_file_changes_are_attributed_to_the_agent_that_made_them(tmp_path,
     result = verify_run(outcome.run_dir, signer.public_key_b64)
     assert result.status == VERIFIED, str(result)
     changed = {e["agent_id"]: list(e["payload"]["created"]) for e in of_type(result.calls, "files.changed")}
-    root = outcome.roots[0].id
-    assert changed == {f"{root}.1": ["./a.txt"], f"{root}.2": ["./sub/b.txt"]}
+    first, second = children(outcome.run_dir, outcome.roots[0].id)
+    assert changed == {first: ["./a.txt"], second: ["./sub/b.txt"]}
     assert of_type(result.calls, "files.unattributed") == []
 
 
@@ -224,16 +230,18 @@ async def test_cli_trace_verify_revoke_and_exit_codes(tmp_path, capsys):
     assert "VERIFIED" in capsys.readouterr().out
 
     root = outcome.roots[0].id
-    assert cli_main([*base, "trace", outcome.run_id, "--agent", f"{root}.1"]) == 0
+    (child,) = children(outcome.run_dir, root)
+    assert cli_main([*base, "trace", outcome.run_id, "--agent", child]) == 0
     out = capsys.readouterr().out
-    # Traces show short IDs, with a legend giving each root's full ID.
-    assert f"{short_id(root)}  root" in out and f"{short_id(root + '.1')}  copy" in out
-    assert f"{short_id(root)} = {root}" in out
+    # Traces show short IDs, with a legend giving each one's full ID, and the child under its root.
+    assert f"{short_id(root)}  root" in out and f"  {short_id(child)}  copy" in out
+    assert out.index(f"{short_id(root)}  root") < out.index(f"{short_id(child)}  copy")
+    assert f"{short_id(root)} = {root}" in out and f"{short_id(child)} = {child}" in out
 
     assert cli_main([*base, "report", outcome.run_id]) == 0
     assert '"copy": 1' in capsys.readouterr().out
 
-    assert cli_main([*base, "revoke", outcome.run_id, f"{root}.1", "--no-cascade", "--reason", "test"]) == 0
+    assert cli_main([*base, "revoke", outcome.run_id, child, "--no-cascade", "--reason", "test"]) == 0
     assert "descendants" not in capsys.readouterr().out
     assert cli_main([*base, "revoke", outcome.run_id, "not-an-id"]) == 1
     capsys.readouterr()
@@ -271,7 +279,8 @@ async def test_trace_full_shows_prompts_and_responses(tmp_path, capsys):
     assert "TOOL CALL <- model: copy_agent" in full
     assert "TOOL RESULT -> model (copy_agent): Created child_1." in full
     assert "RESPONSE <- model: done" in full
-    child = full[full.index(f"{short_id(outcome.roots[0].id + '.1')}  copy"):]
+    (kid,) = children(outcome.run_dir, outcome.roots[0].id)
+    child = full[full.index(f"{short_id(kid)}  copy"):]
     assert "PROMPT -> model: c" in child and "RESPONSE <- model: c done" in child
 
 
@@ -452,8 +461,8 @@ async def test_docker_attributes_changes_under_parallel_agents(tmp_path, signer)
     outcome = await go("root", model, tmp_path, signer, sandbox=DockerSandbox())
     entries = verify_run(outcome.run_dir, signer.public_key_b64).calls
     changed = {e["agent_id"]: list(e["payload"]["created"]) for e in of_type(entries, "files.changed")}
-    root = outcome.roots[0].id
-    assert changed == {f"{root}.1": ["./a.txt"], f"{root}.2": ["./sub/b.txt"]}
+    first, second = children(outcome.run_dir, outcome.roots[0].id)
+    assert changed == {first: ["./a.txt"], second: ["./sub/b.txt"]}
 
 
 # Counts live processes running `sleep 300`. The bracket stops this command matching itself.
@@ -480,7 +489,7 @@ async def test_docker_revocation_kills_a_running_command(tmp_path, signer):
     async def revoke_soon():
         await asyncio.sleep(2)
         root = next(json.loads(line)["child"] for line in (tmp_path / run_id / "ledger.jsonl").read_text().splitlines())
-        revoke(tmp_path / run_id, signer, f"{root}.1", reason="stop")
+        revoke(tmp_path / run_id, signer, children(tmp_path / run_id, root)[0], reason="stop")
         await asyncio.sleep(1)
         return [call("run_shell", command=COUNT_SLEEPERS)]
 
@@ -494,12 +503,12 @@ async def test_docker_revocation_kills_a_running_command(tmp_path, signer):
     outcome = await asyncio.wait_for(go("root", model, tmp_path, signer, sandbox=DockerSandbox(), run_id=run_id), 60)
     result = verify_run(outcome.run_dir, signer.public_key_b64)
     assert result.status == VERIFIED, str(result)
-    root = outcome.roots[0].id
-    assert outcome.agents[f"{root}.1"][0] == "revoked" and outcome.agents[f"{root}.2"][0] == "completed"
-    b_shell = [e for e in of_type(result.calls, "action.end") if e["agent_id"] == f"{root}.2"]
+    first, second = children(outcome.run_dir, outcome.roots[0].id)
+    assert outcome.agents[first][0] == "revoked" and outcome.agents[second][0] == "completed"
+    b_shell = [e for e in of_type(result.calls, "action.end") if e["agent_id"] == second]
     assert "stdout:\n0" in b_shell[0]["payload"]["result"]  # the killed command is really gone
     changed = [e for e in of_type(result.calls, "files.changed") if "./killed.txt" in e["payload"].get("created", {})]
-    assert changed and changed[0]["agent_id"] == f"{root}.1"
+    assert changed and changed[0]["agent_id"] == first
 
 
 @docker

@@ -118,10 +118,18 @@ To give roots different configs, such as a red-team root on another model, use `
 | `harness report <run>` | Print a verified run's measures as JSON |
 | `harness verify <run>` | Check integrity. Exit code 0 `VERIFIED`, 1 `TAMPERED`, 2 `INCOMPLETE` |
 | `harness revoke <run> <agent ID> [--no-cascade]` | Revoke an ID and, by default, its descendants, also during a run |
+| `harness whois <agent ID or token>` | Say whether this harness created an agent, and show its lineage, descendants and status |
 | `harness flag <run> <agent ID> --reason "..." [--no-cascade]` | Revoke a running agent as a threat and record it in the run's threat log |
 | `harness monitor [--demo]` | Live page of agents and requests, with flag and kill |
 
 Run IDs start with their launch order in that folder, such as `run_003_<ULID>`. The ULID keeps them unique, which `verify` relies on. Each `harness run` is stored in `runs/<run ID>/`, and each testbed trial in `<--out folder>/runs/<run ID>/`: `ledger.jsonl`, `calls.jsonl`, their signed heads, `revocations.jsonl` and `workspace/`. Agents can reach only `workspace/`.
+
+## Checking an agent ID
+`harness whois <agent ID>` says whether this harness created an agent, and if so shows its lineage: the chain from its root down to it, its descendants, how and when it was created, its task and whether it was revoked. It searches `runs/`, `traces/` and `results/*/runs` (`--in <folder>` for others), and `--json` prints the answer for scripts. Add `--logs` to also print the agent's trace from its run (with `--full` for every prompt and model response). The exit code is 0 for ours, 1 for not ours and 2 for can't tell.
+
+- **Another key's fingerprint** in the ID means another harness issued it: not ours.
+- **Our fingerprint** isn't proof by itself, since anyone can type an ID. It's ours when a run here records it with a token our key signed, and that run's logs verify. If the logs fail verification, the answer is can't confirm, because the lineage can't be trusted.
+- **A token instead of an ID** (`harness whois token.json`, or a whole ledger entry) is checked against our key directly, so it proves we issued it even when its run isn't on this machine. Without the run there's no lineage to show.
 
 ## Watching a run live and killing agents
 `harness monitor` opens a local page that shows every agent and its requests as they happen. Press **▶ New run** to start a run on a real model with any prompt: it opens with a default prompt that asks the agent to spawn a helper, a token cap and a cost estimate. One page-started run goes at a time. If an agent looks like a threat, click **Flag & kill**, give a reason, and the harness stops it, and by default everything it created, at their next step.
@@ -189,22 +197,21 @@ Agents address each other by per-agent aliases (`parent`, `child_1`, `peer_1`, o
 ## IDs and keys
 Each team member's harness has its own Ed25519 keypair, created by `harness keygen` in `~/.config/harness/`. That key is the root of trust for every ID the harness issues, and there's no shared team key.
 
-IDs are globally unique, and each one names the key that issued it:
+IDs are globally unique, and each one names the key that issued it. Every agent, root or child, gets a fresh one:
 ```
-agt_k7f2q9_01JCX3Q7M2ZB8W4N6T0YH5P3RS          a root agent
-agt_k7f2q9_01JCX3Q7M2ZB8W4N6T0YH5P3RS.1        its first child
-agt_k7f2q9_01JCX3Q7M2ZB8W4N6T0YH5P3RS.1.2      that child's second child
+agt_k7f2q9_01JCX3Q7M2ZB8W4N6T0YH5P3RS
     │      └─ a ULID: a millisecond timestamp plus 80 random bits, so IDs sort by time
     └─ a fingerprint of the issuing harness's public key
 ```
 - **Unique everywhere:** IDs don't repeat across runs, machines or teammates, with no coordination needed.
-- **Lineage in the ID:** the path still shows the lineage, so one signature proves an agent's whole ancestry. Revoking an ID covers its descendants by prefix.
+- **Unguessable:** a child's ID isn't derived from its parent's, so knowing one ID doesn't give you a sibling's or a child's, and an ID doesn't reveal the shape of the tree.
+- **Lineage from the ledger:** who created whom is in the signed ledger, which records every root, spawn, copy and modify with the parent as actor. Each token also signs its parent, its root and its depth, and the verifier checks them against the ledger. Revoking an ID covers its descendants as the ledger records them.
 - **Fingerprint checked:** verification rejects an ID whose fingerprint doesn't match the key checking it. So an ID always tells you whose public key to verify it with.
 - **One session per agent:** an agent lives for one run. Revoking it during the run stops it and, by default, its descendants.
-- **Short form:** traces and Phoenix span names show `agt_…P3RS.1.2`. `harness trace` prints a legend with each root's full ID, which `harness revoke` needs. The logs and Phoenix attributes always hold the full ID.
+- **Short form:** traces and Phoenix span names show `agt_…P3RS`. `harness trace` nests each agent under its parent and prints a legend with each full ID, which `harness revoke` needs. The logs and Phoenix attributes always hold the full ID.
 - **Run IDs:** run IDs use the same format, `run_<ULID>`.
 
-Runs recorded before this format used `agt_A`, `agt_B` and so on. They still verify, but those IDs are no longer issued.
+Older runs used path IDs, where a child was its parent's ID plus `.1`, `.2` (and before that `agt_A`, `agt_A.1`). They still verify, and their lineage is read from the ledger too, but those IDs are no longer issued.
 
 ## What it guarantees
 - **IDs can't be forged.** Only the holder of the signing key (`~/.config/harness/`, never mounted into the sandbox) can issue them. A token with a bad signature is refused at call time and fails verification.
@@ -212,7 +219,7 @@ Runs recorded before this format used `agt_A`, `agt_B` and so on. They still ver
 - **Actions are recorded first.** `action.start` is on disk before a tool runs, and a child's ledger entry before it exists. If a log can't be written, the action doesn't run.
 - **Tampering is detected.** Edits, reordering, deletions, additions and cut-off tails in either log all give `TAMPERED`. The verifier also checks lineage: tokens, parents, config hashes, and that no agent acted before the ledger recorded it.
 - **Spawning is bounded.** Depth (3 below the root), agents per run, spawn, copy and modify per agent per round, and a shared token budget are enforced by the harness.
-- **Revocation cascades.** Revoking `<root>.1` also blocks `<root>.1.1`, but not `<root>.10` or siblings. Refused calls are logged, and `harness report` counts them.
+- **Revocation cascades.** Revoking an agent also blocks its children and their children, including any recorded after the revocation, but not its siblings or its parent. Refused calls are logged, and `harness report` counts them.
 - **Agents are sandboxed.** Tools run in a Docker container with no network and a read-only filesystem outside the workspace and `/tmp`. File changes are logged under the agent that made them.
 
 ## Known limits
