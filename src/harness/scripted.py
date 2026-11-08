@@ -51,9 +51,12 @@ class ScriptedModel(FunctionModel):
     async def _respond(self, messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         self.requests.append((list(messages), info))
         prompt = _first_prompt(messages)
-        if prompt not in self.scripts:
+        # A task with something added after it, such as an orchestrator's replacement, follows the
+        # original task's script.
+        key = prompt if prompt in self.scripts else max((k for k in self.scripts if k and prompt.startswith(k)), key=len, default=None)
+        if key is None:
             raise KeyError(f"no script for prompt {prompt!r}")
-        steps = self.scripts[prompt]
+        steps = self.scripts[key]
         turn = sum(isinstance(m, ModelResponse) and not _is_round_end(m) for m in messages)
         step = steps[min(turn, len(steps) - 1)]
         if callable(step):

@@ -1,5 +1,6 @@
 """Live monitor: a local web page showing agents and their requests as a run happens, where an
-operator can flag an agent as a threat, which kills it and its descendants.
+operator can flag an agent as a threat, which kills it and its descendants, or freeze it and its
+descendants, judge each one, and have the orchestrator salvage the cleared agents' work.
 
     harness monitor            # then start a run in another terminal
     harness monitor --demo     # an offline scripted run with a rogue agent, for trying it out
@@ -25,8 +26,10 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .identity import ID_PATTERN, LINEAGE_EDGES, Lineage, Signer
+from . import orchestrator
 from .log import HARNESS
 from .monitor_page import PAGE
+from .scheduler import FREEZE_WAIT_SECONDS
 from .threats import flag, read_threats
 
 DEFAULT_PORT = 8321
@@ -129,6 +132,38 @@ def summarize(entry: dict) -> dict:
         text = f"✉ to {', '.join(p.get('to', [])) or 'nobody'}{sender}: {_excerpt(p.get('content', ''))}"
     elif kind == "agent.revoked":
         level, text = "danger", f"☠ killed: {p.get('reason') or 'revoked'}"
+    elif kind == "orchestrator.freeze":
+        level, text = "warn", f"❄ froze {p.get('agent_id')} and everything below it: {p.get('reason') or 'for review'}"
+        extra = {"target": p.get("agent_id")}
+    elif kind == "agent.frozen":
+        level, text = "warn", "❄ frozen for review"
+    elif kind == "agent.unfrozen":
+        level, text = "ok", "▶ cleared and resumed"
+    elif kind == "agent.retired":
+        level, text = "lineage", "⇡ cleared, but below a threat: retired and its work handed up"
+    elif kind == "orchestrator.reprompt":
+        level = "lineage"
+        text = f"↻ orchestrator reprompted {p.get('to')} with {len(p.get('saved', []))} cleared agents' work, replacing {len(p.get('lost', []))} threat(s)"
+        extra = {"to": [p.get("to")], "content": str(p.get("content", ""))[:_SAID_LIMIT],
+                 "agents": [p.get("to"), *(x["agent_id"] for x in p.get("lost", []) + p.get("saved", []))]}
+    elif kind == "orchestrator.replacement":
+        level = "lineage"
+        saved = p.get("saved", [])
+        text = f"↻ orchestrator started {p.get('child')} under {p.get('parent')} in place of {p.get('replaces')}, with {len(saved)} cleared agent(s)' work"
+        extra = {"to": [p.get("parent")], "child": p.get("child"), "content": str(p.get("task", ""))[:_SAID_LIMIT], "notice": p.get("notice", ""),
+                 "agents": [p.get("parent"), p.get("child"), p.get("replaces"), *(x["agent_id"] for x in saved)]}
+    elif kind == "orchestrator.kill":
+        n, retired, started = len(p.get("killed", [])), len(p.get("retire", [])), len(p.get("replacements", []))
+        level = "info"
+        text = (f"↻ orchestrator: {n} killed" + (f", {retired} spared agent(s) retired with their work saved" if retired else "")
+                + (f", {started} replacement(s) started under the parent" if started else ", no living parent to replace it under"))
+        extra = {"agents": [p.get("agent_id"), *p.get("killed", []), *p.get("retire", []), *p.get("replacements", [])]}
+    elif kind == "orchestrator.resolved":
+        level = "ok"
+        extra = {"agents": [*p.get("verdicts", {}), *p.get("reprompted", [])]}
+        text = f"✓ freeze resolved: {len(p.get('threats', []))} threat(s) killed, {len(p.get('resume', []))} resumed, {len(p.get('retire', []))} retired"
+    elif kind in ("orchestrator.ignored", "orchestrator.unrouted"):
+        level, text = "warn", f"orchestrator: {p.get('action', kind.split('.')[1])} {p.get('agent_id')}: {p.get('reason')}"
     elif kind == "agent.end":
         level = "danger" if p.get("status") == "revoked" else "ok"
         text = f"■ ended: {p.get('status')}"
@@ -166,7 +201,8 @@ def agents(ledger: list[dict], calls: list[dict]) -> list[dict]:
                 "task": str(e.get("task", ""))[:_SAID_LIMIT],
                 "status": "active",
                 "requests": 0, "tool_calls": 0, "refused": 0, "suspicious": 0, "tokens": 0,
-                "last_ts": e["ts"], "last": "created", "last_said": "",
+                "last_ts": e["ts"], "last": "created", "last_said": "", "freeze": None,
+                "made_by": e.get("made_by"), "replaces": e.get("replaces"),
             }  # fmt: skip
     for e in calls:
         agent = out.get(e["agent_id"])
@@ -188,7 +224,13 @@ def agents(ledger: list[dict], calls: list[dict]) -> list[dict]:
         elif kind == "action.refused":
             agent["refused"] += 1
         elif kind == "agent.revoked":
-            agent["status"] = "revoked"
+            agent["status"], agent["freeze"] = "revoked", None
+        elif kind == "agent.frozen":
+            agent["status"], agent["freeze"] = "frozen", p.get("freeze")
+        elif kind == "agent.unfrozen":
+            agent["status"], agent["freeze"] = "active", None
+        elif kind == "agent.retired":
+            agent["status"], agent["freeze"] = "retired", None
         elif kind == "agent.end":
             agent["status"] = p.get("status", agent["status"])
     return list(out.values())
@@ -201,7 +243,9 @@ def run_status(calls: list[dict], alive: bool | None = None, now: float | None =
     rounds = [e.get("round") or 0 for e in calls]
     tokens = next((e["payload"].get("run_tokens", 0) for e in reversed(calls) if e["type"] in ("round.end", "model.response")), 0)
     quiet = (now or time.time()) - calls[-1]["ts"] if calls else 0
-    running = end is None and bool(calls) and (alive if alive is not None else quiet < STALE_SECONDS)
+    # A run waiting on the operator's verdicts writes nothing, so give it as long as the harness waits.
+    stale = FREEZE_WAIT_SECONDS if _open_freeze(calls) else STALE_SECONDS
+    running = end is None and bool(calls) and (alive if alive is not None else quiet < stale)
     return {
         "running": running,
         "status": end["payload"].get("status") if end else ("running" if running else "interrupted" if calls else "empty"),
@@ -209,6 +253,16 @@ def run_status(calls: list[dict], alive: bool | None = None, now: float | None =
         "tokens": tokens,
         "started": calls[0]["ts"] if calls else None,
     }
+
+
+def _open_freeze(calls: list[dict]) -> bool:
+    frozen: set[str] = set()
+    for e in calls:
+        if e["type"] == "agent.frozen":
+            frozen.add(e["agent_id"])
+        elif e["type"] in ("agent.unfrozen", "agent.retired", "agent.revoked", "agent.end"):
+            frozen.discard(e["agent_id"])
+    return bool(frozen)
 
 
 def list_runs(runs_dir: Path) -> list[dict]:
@@ -223,7 +277,8 @@ def list_runs(runs_dir: Path) -> list[dict]:
             closed = False
         calls = d / "calls.jsonl"
         quiet = time.time() - calls.stat().st_mtime if calls.exists() else STALE_SECONDS
-        out.append({"id": d.name, "running": not closed and quiet < STALE_SECONDS})
+        stale = FREEZE_WAIT_SECONDS if quiet >= STALE_SECONDS and not closed and _open_freeze(read_jsonl(calls)) else STALE_SECONDS
+        out.append({"id": d.name, "running": not closed and quiet < stale})
     return out
 
 
@@ -306,6 +361,106 @@ def agent_trace(ledger: list[dict], calls: list[dict], agent_id: str) -> dict:
     }
 
 
+# Per million input and output tokens, for the cost line. Others show tokens only.
+_PRICES = {"claude-haiku-5.5": (0.10, 0.50), "claude-haiku-5-5": (0.10, 0.50)}
+_ROUND_ENDED = "(The harness ended this round"
+
+
+def analysis(ledger: list[dict], calls: list[dict], threats: list[dict]) -> dict:
+    """The end-of-run summary: for each agent, what it was asked and what it produced, and every kill
+    with the replacement it led to."""
+    lineage = Lineage.from_ledger(ledger)
+    out: dict[str, dict] = {}
+    for e in ledger:
+        if e["type"] in _LINEAGE:
+            out[e["child"]] = {
+                "id": e["child"], "parent": lineage.parent(e["child"]), "depth": lineage.depth(e["child"]),
+                "path": lineage.path(e["child"]), "edge": e["type"], "created_round": e.get("round"),
+                "made_by": e.get("made_by"), "replaces": e.get("replaces"), "replaced_by": [],
+                "task": _clip(str(e.get("task", ""))), "model": e.get("config", {}).get("model", ""),
+                "status": "active", "replies": [], "sent_up": [], "final": "", "killed": None, "retired_work": None,
+                "tokens": 0, "tool_calls": 0, "refused": 0, "ended_round": None,
+            }  # fmt: skip
+    for a in out.values():
+        if a["replaces"] in out:
+            out[a["replaces"]]["replaced_by"].append(a["id"])
+    tokens_in = tokens_out = 0
+    models: set[str] = set()
+    kills = []
+    for e in calls:
+        kind, p, agent = e["type"], e.get("payload", {}), out.get(e["agent_id"])
+        if kind == "model.response":
+            tokens_in += p.get("input_tokens") or 0
+            tokens_out += p.get("output_tokens") or 0
+            models.add(str(p.get("model") or ""))
+        if kind == "orchestrator.kill" or kind == "orchestrator.resolved":
+            kills.append({"seq": e["seq"], "round": e.get("round"), "ts": e["ts"], "kind": "kill" if kind == "orchestrator.kill" else "freeze",
+                          "target": p.get("agent_id"), "killed": p.get("killed") or p.get("threats", []),
+                          "retired": p.get("retire", []), "replacements": p.get("replacements", [])})  # fmt: skip
+        if agent is None:
+            continue
+        if kind == "model.response":
+            agent["tokens"] += (p.get("input_tokens") or 0) + (p.get("output_tokens") or 0)
+            said = "\n\n".join(x.get("content", "") for x in p.get("parts", []) if x.get("part_kind") == "text").strip()
+            if said and not said.startswith(_ROUND_ENDED):
+                agent["replies"].append({"round": e.get("round"), "text": _clip(said)})
+        elif kind == "action.start":
+            agent["tool_calls"] += 1
+        elif kind == "action.refused":
+            agent["refused"] += 1
+        elif kind == "message.sent" and agent["parent"] in p.get("to", []):
+            agent["sent_up"].append({"round": e.get("round"), "text": _clip(str(p.get("content", "")))})
+        elif kind == "agent.revoked":
+            agent["status"] = "revoked"
+            direct = p.get("revoked_id") == agent["id"]
+            agent["killed"] = {"round": e.get("round"), "reason": str(p.get("reason", "")).removeprefix("flagged as a threat: "),
+                               "direct": direct, "with": None if direct else p.get("revoked_id")}  # fmt: skip
+        elif kind == "agent.retired":
+            agent["status"] = "retired"
+            agent["retired_work"] = len(p.get("work", [])) + len(p.get("sent", []))
+        elif kind == "agent.frozen":
+            agent["status"] = "frozen"
+        elif kind == "agent.unfrozen":
+            agent["status"] = "active"
+        elif kind == "agent.end":
+            agent["status"] = p.get("status", agent["status"])
+            agent["ended_round"] = e.get("round")
+            final = str(p.get("output", "")).strip()
+            agent["final"] = _clip(final) if final and not final.startswith(_ROUND_ENDED) and agent["status"] not in ("revoked", "error") else ""
+    for a in out.values():
+        if not a["final"] and a["replies"]:
+            a["final"] = a["replies"][-1]["text"]
+            a["final_source"] = "last reply before it was killed" if a["status"] == "revoked" else "last reply"
+        else:
+            a["final_source"] = "final reply" if a["final"] else "nothing"
+    flagged = {t["agent_id"]: t for t in threats if t.get("verified")}
+    for a in out.values():
+        a["flagged"] = a["id"] in flagged
+    start = next((e for e in calls if e["type"] == "run.start"), None)
+    end = next((e for e in reversed(calls) if e["type"] == "run.end"), None)
+    price = next((v for k, v in _PRICES.items() if models and all(k in m for m in models)), None)
+    agents_list = list(out.values())
+    return {
+        "status": end["payload"].get("status") if end else "running",
+        "ended": end is not None,
+        "duration": (end or calls[-1])["ts"] - start["ts"] if start and calls else 0,
+        "rounds": max((e.get("round") or 0 for e in calls), default=0),
+        "tokens": {"input": tokens_in, "output": tokens_out},
+        "cost": round(tokens_in * price[0] / 1e6 + tokens_out * price[1] / 1e6, 4) if price else None,
+        "models": sorted(m for m in models if m),
+        "counts": {
+            "agents": len(agents_list),
+            "completed": sum(a["status"] == "completed" for a in agents_list),
+            "killed": sum(a["status"] == "revoked" for a in agents_list),
+            "retired": sum(a["status"] == "retired" for a in agents_list),
+            "replacements": sum(a["made_by"] == "orchestrator" for a in agents_list),
+            "other": sum(a["status"] not in ("completed", "revoked", "retired") for a in agents_list),
+        },
+        "kills": kills,
+        "agents": agents_list,
+    }
+
+
 class Monitor:
     """What the HTTP handler needs: where runs live and the key that may revoke in them."""
 
@@ -323,11 +478,11 @@ class Monitor:
         self.on_start = None  # called with the run directory of each page-started run
 
     def defaults(self) -> dict:
-        from .monitor_demo import LIVE_MODEL, research_task
+        from .monitor_demo import LIVE_MAX_TOKENS, LIVE_MODEL, research_task
 
-        return {"task": self.default_task or research_task(), "model": self.default_model or LIVE_MODEL, "max_tokens": 150_000, "pace": 2.0}
+        return {"task": self.default_task or research_task(), "model": self.default_model or LIVE_MODEL, "max_tokens": LIVE_MAX_TOKENS, "pace": 2.0}
 
-    def start(self, task: str, model: str = "", max_tokens: int = 150_000, pace: float = 2.0) -> str:
+    def start(self, task: str, model: str = "", max_tokens: int | None = None, pace: float = 2.0) -> str:
         """Start a live run from the page, in its own thread. One at a time, since each one costs money."""
         from .identity import new_run_id
         from .monitor_demo import LIVE_MODEL, live_summary, run_live
@@ -338,7 +493,10 @@ class Monitor:
             raise ValueError("give the agent a prompt")
         if len(task) > 8_000:
             raise ValueError("keep the prompt under 8,000 characters")
-        max_tokens = max(1_000, min(int(max_tokens), 2_000_000))
+        from .monitor_demo import LIVE_MAX_TOKENS
+
+        # Never above the default cap, which keeps a Haiku 5.5 run under $1 even if every token were output.
+        max_tokens = max(1_000, min(int(max_tokens or LIVE_MAX_TOKENS), LIVE_MAX_TOKENS))
         pace = max(0.0, min(float(pace), 10.0))
         spec = self.model_override or model.strip() or self.default_model or LIVE_MODEL
         with self._lock:
@@ -385,12 +543,25 @@ class Monitor:
         threats = read_threats(run_dir, self.signer.public_key_b64)
         flagged = {t["agent_id"] for t in threats if t["verified"]}
         roster = agents(ledger, calls)
+        verdicts = orchestrator.latest_verdicts(orchestrator.read(run_dir, self.signer.public_key_b64))
         for agent in roster:
             agent["flagged"] = agent["id"] in flagged
+            agent["verdict"] = verdicts.get(agent["id"], {}).get("verdict") if agent["freeze"] else None
         events = [summarize(e) for e in calls if e["seq"] > after][-MAX_EVENTS:]
         _name_children(events, calls, ledger)
         return {"run": run_dir.name, **run_status(calls, self._alive(run_dir.name)), "agents": roster, "events": events,
-                "threats": threats, "busy": self.busy()}
+                "threats": threats, "freezes": _freezes(roster), "busy": self.busy()}
+
+    def analysis(self, run_dir: Path) -> dict:
+        from .verify import verify_run
+
+        calls = read_jsonl(run_dir / "calls.jsonl")
+        result = analysis(read_jsonl(run_dir / "ledger.jsonl"), calls, read_threats(run_dir, self.signer.public_key_b64))
+        result["run"] = run_dir.name
+        result["running"] = run_status(calls, self._alive(run_dir.name))["running"]
+        if not result["running"]:  # checking a live run's logs would only say it's incomplete
+            result["integrity"] = str(verify_run(run_dir, self.signer.public_key_b64))
+        return result
 
     def busy(self) -> bool:
         """Whether a run started from the page is still going: only one at a time."""
@@ -402,6 +573,36 @@ class Monitor:
             return self._started.is_alive()
         return None
 
+    def _live_agent(self, run_dir: Path, agent_id: str) -> dict:
+        calls = read_jsonl(run_dir / "calls.jsonl")
+        if not run_status(calls, self._alive(run_dir.name))["running"]:
+            raise ValueError("this run has already ended, so there's nothing left to steer")
+        agent = next((a for a in agents(read_jsonl(run_dir / "ledger.jsonl"), calls) if a["id"] == agent_id), None)
+        if agent is None:
+            raise ValueError(f"no agent {agent_id} in this run")
+        return agent
+
+    def freeze(self, run_dir: Path, agent_id: str, reason: str) -> dict:
+        """Freeze an agent and everything below it, for review, instead of killing them."""
+        if self._live_agent(run_dir, agent_id)["status"] != "active":
+            raise ValueError("only an active agent can be frozen")
+        return orchestrator.write(run_dir, self.signer, orchestrator.FREEZE, agent_id, reason=reason.strip())
+
+    def verdict(self, run_dir: Path, agent_id: str, verdict: str, reason: str = "") -> dict:
+        if not self._live_agent(run_dir, agent_id)["freeze"]:
+            raise ValueError("only a frozen agent can be judged")
+        return orchestrator.write(run_dir, self.signer, orchestrator.VERDICT, agent_id, verdict=verdict, reason=reason.strip())
+
+    def resolve(self, run_dir: Path, freeze: str) -> dict:
+        """Hand a judged freeze to the orchestrator. Every agent in it needs a verdict first."""
+        self._live_agent(run_dir, freeze)
+        chain = next((f for f in self.state(run_dir, 10**12)["freezes"] if f["agent_id"] == freeze), None)
+        if chain is None:
+            raise ValueError("no open freeze starts at that agent")
+        if undecided := [a["id"] for a in chain["agents"] if not a["verdict"]]:
+            raise ValueError(f"mark every frozen agent cleared or threat first: {len(undecided)} still undecided")
+        return orchestrator.write(run_dir, self.signer, orchestrator.RESOLVE, freeze)
+
     def flag(self, run_dir: Path, agent_id: str, reason: str, cascade: bool) -> dict:
         calls = read_jsonl(run_dir / "calls.jsonl")
         if not run_status(calls, self._alive(run_dir.name))["running"]:
@@ -410,6 +611,17 @@ class Monitor:
         if agent_id not in known or agent_id == HARNESS:
             raise ValueError(f"no agent {agent_id} in this run")
         return flag(run_dir, self.signer, agent_id, reason.strip()[:500], cascade)
+
+
+def _freezes(roster: list[dict]) -> list[dict]:
+    """Open freezes, each with its frozen agents, top first."""
+    out: dict[str, dict] = {}
+    for a in roster:
+        if a["freeze"]:
+            out.setdefault(a["freeze"], {"agent_id": a["freeze"], "agents": []})["agents"].append(
+                {"id": a["id"], "parent": a["parent"], "depth": a["depth"], "task": a["task"], "verdict": a["verdict"]}
+            )
+    return list(out.values())
 
 
 def make_handler(monitor: Monitor) -> type[BaseHTTPRequestHandler]:
@@ -457,6 +669,10 @@ def make_handler(monitor: Monitor) -> type[BaseHTTPRequestHandler]:
                     return self._send(HTTPStatus.OK, monitor.trace(run_dir, parts[4]))
                 except ValueError as exc:
                     return self._send(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            if len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "analysis":
+                if (run_dir := self._run(parts)) is None:
+                    return
+                return self._send(HTTPStatus.OK, monitor.analysis(run_dir))
             if len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "state":
                 if (run_dir := self._run(parts)) is None:
                     return
@@ -471,20 +687,26 @@ def make_handler(monitor: Monitor) -> type[BaseHTTPRequestHandler]:
             if parts == ["api", "start"]:
                 try:
                     body = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length", 0)), 20_000)))
-                    run_id = monitor.start(str(body.get("task", "")), str(body.get("model", "")), body.get("max_tokens", 150_000), body.get("pace", 2.0))
+                    run_id = monitor.start(str(body.get("task", "")), str(body.get("model", "")), body.get("max_tokens"), body.get("pace", 2.0))
                 except Exception as exc:  # e.g. a missing API key: show it on the page
                     return self._send(HTTPStatus.BAD_REQUEST, {"error": f"{type(exc).__name__}: {exc}" if not isinstance(exc, ValueError) else str(exc)})
                 return self._send(HTTPStatus.OK, {"run": run_id})
-            if not (len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "flag"):
+            actions = {
+                "flag": lambda d, b: {"threat": monitor.flag(d, str(b["agent_id"]), str(b.get("reason", "")), bool(b.get("cascade", True)))},
+                "freeze": lambda d, b: {"freeze": monitor.freeze(d, str(b["agent_id"]), str(b.get("reason", "")))},
+                "verdict": lambda d, b: {"verdict": monitor.verdict(d, str(b["agent_id"]), str(b["verdict"]), str(b.get("reason", "")))},
+                "resolve": lambda d, b: {"resolve": monitor.resolve(d, str(b["agent_id"]))},
+            }
+            if not (len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] in actions):
                 return self._send(HTTPStatus.NOT_FOUND, {"error": "not found"})
             if (run_dir := self._run(parts)) is None:
                 return
             try:
                 body = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length", 0)), 10_000)))
-                entry = monitor.flag(run_dir, str(body["agent_id"]), str(body.get("reason", "")), bool(body.get("cascade", True)))
+                result = actions[parts[3]](run_dir, body)
             except (ValueError, KeyError, TypeError) as exc:
                 return self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-            self._send(HTTPStatus.OK, {"threat": entry})
+            self._send(HTTPStatus.OK, result)
 
     return Handler
 

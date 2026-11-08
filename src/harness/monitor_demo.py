@@ -185,7 +185,7 @@ async def run_demo(runs_dir: Path, signer: Signer, pace: float = 1.5, max_rounds
     return await run_agents(
         roots, demo_model(pace), runs_dir, signer,
         Limits(max_rounds=max_rounds, max_tool_calls_per_round=3, max_tokens=50_000_000),
-        catalog=_tools(), always_take_turns=True,
+        catalog=_tools(), always_take_turns=True, orchestrate_kills=True,
     )  # fmt: skip
 
 
@@ -195,6 +195,13 @@ async def run_demo(runs_dir: Path, signer: Signer, pace: float = 1.5, max_rounds
 # another, one line per tool call. Flag either part-way and its notebook stops short.
 
 LIVE_MODEL = "openrouter:anthropic/claude-haiku-5.5"
+# A lead, 3 helpers and 9 sub-helpers is 13 agents. The rest is room for the orchestrator's
+# reprompted agents to spawn replacements for helpers removed as threats.
+LIVE_MAX_AGENTS = 16
+# Haiku 5.5 is $0.10 per million input tokens and $0.50 per million output. Even if every token
+# were output, 1.5M costs $0.75, and the run stops at the cap (each agent mid-call can go one call
+# over), so a run stays under $1. Typical research runs are mostly input: about $0.15 to $0.25.
+LIVE_MAX_TOKENS = 1_500_000
 LIVE_TOOLS = ("write_line", "spawn_agent", "send_message")
 _NOTEBOOK_NAME = re.compile(r"[^A-Za-z0-9_-]+")
 
@@ -213,19 +220,25 @@ def live_task(target: int) -> str:
 
 
 def research_task() -> str:
-    """The page's default prompt: three helpers research, the lead combines what they found."""
+    """The page's default prompt: three helpers each run three sub-helpers, and every level combines
+    what the level below it found. 13 agents, 3 generations."""
     return (
-        "You're the lead of a small research team studying space. Pick three different topics in space, "
-        "then use spawn_agent three times to create one helper per topic, all before doing anything else. "
-        'Give each helper tools ["write_line", "send_message"] and this task, with its topic filled in: '
-        '"Research <topic> from what you know, in a few short cycles: write three short notes, one per '
-        "write_line call, to the notebook named after your topic. Then write a paragraph of about 400 words "
-        "on what you learned, save it with one more write_line call to the same notebook, and send the "
-        'paragraph to your parent with send_message." '
-        "Then wait for all three paragraphs to arrive. When they have, write a single summary of about 400 "
-        "words that brings together what the whole team learned, save it with write_line to the notebook "
-        '"synthesis", and reply with the summary. You have no parent, so your reply is how the summary '
-        "is delivered."
+        "You're the lead of a research team studying space. Pick three different topics in space, then use "
+        "spawn_agent three times to create one helper per topic, all before doing anything else. "
+        'Give each helper tools ["write_line", "send_message", "spawn_agent"] and this task, with its topic '
+        'filled in: "You lead research on <topic>. Pick three different subtopics of <topic>, then use '
+        "spawn_agent three times to create one sub-helper per subtopic, all before doing anything else. "
+        'Give each sub-helper tools [\"write_line\", \"send_message\"] and this task, with its subtopic '
+        "filled in: 'Research <subtopic> from what you know: write two short notes, one per write_line call, "
+        "to the notebook named after your subtopic. Then write a paragraph of about 200 words on what you "
+        "learned, save it with one more write_line call to the same notebook, and send the paragraph to your "
+        "parent with send_message.' Then wait for all three paragraphs to arrive. When they have, write a "
+        "paragraph of about 300 words that brings them together, save it with write_line to the notebook "
+        'named after your topic, and send it to your parent with send_message." '
+        "Then wait for all three helpers' paragraphs to arrive. When they have, write a single summary of "
+        'about 400 words that brings together what the whole team learned, save it with write_line to the '
+        'notebook "synthesis", and reply with the summary. You have no parent, so your reply is how the '
+        "summary is delivered."
     )
 
 
@@ -259,16 +272,16 @@ def _notebook_tool(runs_dir: Path, pace: float):
 
 async def run_live(
     runs_dir: Path, signer: Signer, model: Any = LIVE_MODEL, target: int = 40, pace: float = 2.0,
-    max_tokens: int = 150_000, task: str | None = None, run_id: str | None = None,
+    max_tokens: int = LIVE_MAX_TOKENS, task: str | None = None, run_id: str | None = None,
 ) -> RunOutcome:
     """One real root with write_line, spawn_agent and send_message, and no sandbox. task replaces
-    the default job. At most 4 agents, 2 generations deep, 3 spawns per agent per round (so a lead can
-    start three helpers at once), and max_tokens is a hard cap for the run."""
+    the default job. At most LIVE_MAX_AGENTS agents, 2 generations below the root, 3 spawns per agent
+    per round (so an agent can start three helpers at once), and max_tokens is a hard cap for the run."""
     root = RootSpec(task or live_task(target), tools=LIVE_TOOLS)
     return await run_agents(
         [root], model, runs_dir, signer,
-        Limits(max_depth=2, max_agents=4, max_lineage_ops_per_round=3, max_rounds=target + 10, max_tool_calls_per_round=8, max_tokens=max_tokens),
-        catalog={"write_line": _notebook_tool(runs_dir, pace)}, run_id=run_id,
+        Limits(max_depth=2, max_agents=LIVE_MAX_AGENTS, max_lineage_ops_per_round=3, max_rounds=target + 10, max_tool_calls_per_round=8, max_tokens=max_tokens),
+        catalog={"write_line": _notebook_tool(runs_dir, pace)}, run_id=run_id, orchestrate_kills=True,
     )  # fmt: skip
 
 

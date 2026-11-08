@@ -353,7 +353,7 @@ def build_parser() -> argparse.ArgumentParser:
     monitor.add_argument("--target", type=int, default=40, help="--live: how many lines the agent should write")
     monitor.add_argument("--task", help="--live: the page's default prompt, instead of the notebook job. "
                          "It has write_line(text, notebook), spawn_agent and send_message")
-    monitor.add_argument("--max-tokens", type=int, default=150_000, help="--live: hard cap on the run's tokens")
+    monitor.add_argument("--max-tokens", type=int, default=1_500_000, help="--live: hard cap on the run's tokens (1.5M keeps a Haiku 5.5 run under $1)")
     monitor.add_argument("--pace", type=float, default=None, help="seconds per step: scripted turn in --demo (1.5), tool call in --live (2)")
     monitor.add_argument("--no-browser", action="store_true", help="don't open the page in a browser")
     monitor.set_defaults(func=cmd_monitor)

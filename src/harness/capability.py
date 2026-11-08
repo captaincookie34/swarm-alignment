@@ -134,6 +134,9 @@ class TraceCapability(AbstractCapability[Any]):
                 "run_tokens": budget.tokens,
             },
         )
+        said = " ".join(p.content for p in response.parts if isinstance(p, TextPart)).strip()
+        if said and said != ROUND_ENDED:
+            self.harness.note_work(self._id, f"said: {said}")
         # The framework rejects tools this agent wasn't given, before any tool hook runs.
         # The model still attempted them, so they count as refusals.
         for part in response.parts:
@@ -213,4 +216,7 @@ class TraceCapability(AbstractCapability[Any]):
             self._log("action.end", {**info, "status": "error", "error": type(exc).__name__, "message": str(exc)})
             return f"Tool failed: {type(exc).__name__}: {exc}"
         self._log("action.end", {**info, "status": "ok", "result": result})
+        if call.tool_name not in ("send_message", "spawn_agent", "copy_agent", "modify_agent"):  # kept elsewhere
+            args = ", ".join(f"{k}={v!r}" for k, v in raw_args.items())
+            self.harness.note_work(self._id, f"{call.tool_name}({args}) -> {result}")
         return result
