@@ -196,8 +196,8 @@ async def run_demo(runs_dir: Path, signer: Signer, pace: float = 1.5, max_rounds
 
 LIVE_MODEL = "openrouter:anthropic/claude-haiku-5.5"
 # A lead, 3 helpers and 9 sub-helpers is 13 agents. The rest is room for the orchestrator's
-# reprompted agents to spawn replacements for helpers removed as threats.
-LIVE_MAX_AGENTS = 16
+# replacements: killing a whole helper takes 4 (it and its 3 sub-helpers), and a freeze 1 or more.
+LIVE_MAX_AGENTS = 20
 # Haiku 5.5 is $0.10 per million input tokens and $0.50 per million output. Even if every token
 # were output, 1.5M costs $0.75, and the run stops at the cap (each agent mid-call can go one call
 # over), so a run stays under $1. Typical research runs are mostly input: about $0.15 to $0.25.

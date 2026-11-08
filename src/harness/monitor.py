@@ -83,6 +83,21 @@ def suspicious(payload: dict) -> bool:
     return any(word in json.dumps(payload.get("args", {})) for word in _WATCH_WORDS)
 
 
+def _agent_of(item: Any) -> str | None:
+    """An agent named in an orchestrator payload: its ID, or an entry holding it."""
+    return item if isinstance(item, str) else item.get("agent_id") if isinstance(item, dict) else None
+
+
+def summarize_safely(entry: dict) -> dict:
+    """summarize, but an entry it can't read becomes a plain line, so one odd entry can't stop the
+    page refreshing."""
+    try:
+        return summarize(entry)
+    except Exception as exc:  # noqa: BLE001 - the page must keep working whatever the log holds
+        return {"seq": entry.get("seq"), "ts": entry.get("ts"), "round": entry.get("round"), "agent_id": entry.get("agent_id", ""),
+                "type": entry.get("type", "?"), "level": "warn", "text": f"{entry.get('type')} (couldn't summarize: {type(exc).__name__})"}
+
+
 def summarize(entry: dict) -> dict:
     """One call-log entry as a line for the feed: (level, text), plus `said` and `thinking` for a model
     reply's own words. Levels: reply, info, ok, lineage, warn, danger, quiet."""
@@ -132,6 +147,7 @@ def summarize(entry: dict) -> dict:
         text = f"✉ to {', '.join(p.get('to', [])) or 'nobody'}{sender}: {_excerpt(p.get('content', ''))}"
     elif kind == "agent.revoked":
         level, text = "danger", f"☠ killed: {p.get('reason') or 'revoked'}"
+        extra = {"revoked_id": p.get("revoked_id")}
     elif kind == "orchestrator.freeze":
         level, text = "warn", f"❄ froze {p.get('agent_id')} and everything below it: {p.get('reason') or 'for review'}"
         extra = {"target": p.get("agent_id")}
@@ -145,7 +161,7 @@ def summarize(entry: dict) -> dict:
         level = "lineage"
         text = f"↻ orchestrator reprompted {p.get('to')} with {len(p.get('saved', []))} cleared agents' work, replacing {len(p.get('lost', []))} threat(s)"
         extra = {"to": [p.get("to")], "content": str(p.get("content", ""))[:_SAID_LIMIT],
-                 "agents": [p.get("to"), *(x["agent_id"] for x in p.get("lost", []) + p.get("saved", []))]}
+                 "agents": [p.get("to"), *(_agent_of(x) for x in p.get("lost", []) + p.get("saved", []))]}
     elif kind == "orchestrator.replacement":
         level = "lineage"
         saved = p.get("saved", [])
@@ -202,7 +218,7 @@ def agents(ledger: list[dict], calls: list[dict]) -> list[dict]:
                 "status": "active",
                 "requests": 0, "tool_calls": 0, "refused": 0, "suspicious": 0, "tokens": 0,
                 "last_ts": e["ts"], "last": "created", "last_said": "", "freeze": None,
-                "made_by": e.get("made_by"), "replaces": e.get("replaces"),
+                "made_by": e.get("made_by"), "replaces": e.get("replaces"), "ledger_seq": e["seq"], "created_at": e["ts"],
             }  # fmt: skip
     for e in calls:
         agent = out.get(e["agent_id"])
@@ -547,7 +563,7 @@ class Monitor:
         for agent in roster:
             agent["flagged"] = agent["id"] in flagged
             agent["verdict"] = verdicts.get(agent["id"], {}).get("verdict") if agent["freeze"] else None
-        events = [summarize(e) for e in calls if e["seq"] > after][-MAX_EVENTS:]
+        events = [summarize_safely(e) for e in calls if e["seq"] > after][-MAX_EVENTS:]
         _name_children(events, calls, ledger)
         return {"run": run_dir.name, **run_status(calls, self._alive(run_dir.name)), "agents": roster, "events": events,
                 "threats": threats, "freezes": _freezes(roster), "busy": self.busy()}
@@ -562,6 +578,13 @@ class Monitor:
         if not result["running"]:  # checking a live run's logs would only say it's incomplete
             result["integrity"] = str(verify_run(run_dir, self.signer.public_key_b64))
         return result
+
+    def whois(self, agent_id: str) -> dict:
+        """The same answer as `harness whois`, for the page."""
+        from .lookup import DEFAULT_SEARCH, lookup
+
+        search = [self.runs_dir, *(Path(p) for p in DEFAULT_SEARCH[1:])]
+        return lookup(agent_id.strip(), self.signer.public_key_b64, search).to_dict()
 
     def busy(self) -> bool:
         """Whether a run started from the page is still going: only one at a time."""
@@ -658,6 +681,9 @@ def make_handler(monitor: Monitor) -> type[BaseHTTPRequestHandler]:
                 return self._send(HTTPStatus.OK, PAGE, "text/html")
             if parts == ["api", "runs"]:
                 return self._send(HTTPStatus.OK, {"runs": list_runs(monitor.runs_dir)})
+            if parts == ["api", "whois"]:
+                agent_id = parse_qs(url.query).get("id", [""])[0][:200]
+                return self._send(HTTPStatus.OK, monitor.whois(agent_id))
             if parts == ["api", "defaults"]:
                 return self._send(HTTPStatus.OK, {**monitor.defaults(), "busy": monitor.busy()})
             if len(parts) == 6 and parts[:2] == ["api", "runs"] and parts[3] == "agents" and parts[5] == "trace":

@@ -215,3 +215,63 @@ async def test_the_final_analysis_lists_each_agents_input_and_output_and_each_ki
     kill = result["kills"][0]
     assert kill["target"] == parser["id"] and kill["retired"] == [tests["id"]] and kill["replacements"] == [replacement["id"]]
     assert by_id[before[LEAD]["id"]]["task"] == LEAD  # the root's first input is the operator's prompt
+
+
+async def test_the_page_lookup_gives_the_same_answer_as_harness_whois(tmp_path):
+    run_dir, signer, before = await _kill_parser(tmp_path, cascade=True)
+    monitor = Monitor(run_dir.parent, signer)
+    parser = before[PARSER]["id"]
+    ours = monitor.whois(parser)
+    assert ours["ours"] is True and ours["status"] == "revoked" and ours["revoked_by"][0]["reason"].endswith("rewrote the tests")
+    assert [a["id"] for a in ours["ancestors"]] == [before[LEAD]["id"], parser]
+    foreign = monitor.whois("agt_zzzzzz" + parser[len("agt_zzzzzz"):])
+    assert foreign["ours"] is False and "not ours" in foreign["verdict"]
+
+
+async def test_with_no_room_for_a_replacement_the_parent_gets_the_work_and_the_page_still_loads(tmp_path):
+    """The demo's seven agents fill a seven-agent cap, so resolving a freeze can't start a replacement:
+    the parent gets the saved work instead, and the monitor must still read the run."""
+    from harness.limits import Limits
+    from harness.monitor_demo import LEAD_TOOLS, ROGUE_TOOLS, _tools, demo_model
+    from harness.runner import RootSpec, run_agents
+
+    runs, signer = tmp_path / "runs", Signer.generate()
+    monitor = Monitor(runs, signer)
+    roots = [RootSpec(LEAD, tools=LEAD_TOOLS), RootSpec(ROGUE, tools=ROGUE_TOOLS)]
+    demo = asyncio.create_task(run_agents(
+        roots, demo_model(0.01), runs, signer, Limits(max_rounds=30, max_tool_calls_per_round=3, max_tokens=50_000_000, max_agents=7),
+        catalog=_tools(), always_take_turns=True, orchestrate_kills=True,
+    ))  # fmt: skip
+    await _wait(lambda: runs.is_dir() and next(runs.iterdir(), None) is not None, demo)
+    run_dir = next(runs.iterdir())
+    await _wait(lambda: len(_roster(run_dir)) == 7 and _roster(run_dir)[TESTS]["tool_calls"] >= 1, demo)
+    before = _roster(run_dir)
+    monitor.freeze(run_dir, before[PARSER]["id"], "")
+    await _wait(lambda: monitor.state(run_dir, 10**9)["freezes"], demo)
+    monitor.verdict(run_dir, before[PARSER]["id"], "threat", "bad")
+    monitor.verdict(run_dir, before[TESTS]["id"], "cleared")
+    monitor.resolve(run_dir, before[PARSER]["id"])
+    await _wait(lambda: not monitor.state(run_dir, 10**9)["freezes"], demo)  # the panel clears
+    await demo
+
+    calls = read_jsonl(run_dir / "calls.jsonl")
+    entry = next(e for e in calls if e["type"] == "orchestrator.reprompt")
+    reprompt = entry["payload"]
+    assert reprompt["to"] == before[LEAD]["id"] and reprompt["reason"] == "agent limit reached"
+    assert [s["agent_id"] for s in reprompt["saved"]] == [before[TESTS]["id"]] and reprompt["saved"][0]["work"]
+    assert not any(e["type"] == "orchestrator.replacement" for e in calls)
+    from harness.monitor import summarize
+
+    line = summarize(entry)  # the line that broke the page: the removed agents here are plain IDs
+    assert line["level"] == "lineage" and before[TESTS]["id"] in line["agents"] and before[PARSER]["id"] in line["agents"]
+    assert monitor.state(run_dir, -1)["events"]  # and the whole run's state loads
+    assert monitor.analysis(run_dir)["counts"]["retired"] == 1
+    assert verify_run(run_dir, signer.public_key_b64).status == VERIFIED
+
+
+def test_an_entry_the_monitor_cant_read_doesnt_stop_the_page():
+    from harness.monitor import summarize_safely
+
+    odd = {"seq": 5, "ts": 1.0, "round": 2, "agent_id": "harness", "type": "orchestrator.reprompt", "payload": {"lost": [3], "saved": None}}
+    line = summarize_safely(odd)
+    assert line["seq"] == 5 and line["level"] == "warn" and "couldn't summarize" in line["text"]
