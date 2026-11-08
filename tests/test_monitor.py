@@ -325,3 +325,29 @@ def test_a_run_stopped_without_closing_shows_as_interrupted_and_doesnt_block_the
     assert not state["running"] and state["status"] == "interrupted" and state["busy"] is False
     with pytest.raises(ValueError, match="already ended"):
         monitor.flag(run_dir, "agt_A", "x", True)
+
+
+async def test_the_live_limits_fit_a_lead_three_helpers_and_nine_sub_helpers(tmp_path):
+    from harness.monitor_demo import LIVE_MAX_TOKENS, research_task, run_live
+    from harness.scripted import ScriptedModel, call, say
+
+    def spawner(prefix, tools):
+        return [[call("spawn_agent", task=f"{prefix}{i}", system_prompt="help", tools=tools) for i in range(1, 4)], [say("waiting")]]
+
+    scripts = {research_task(): spawner("helper ", ["write_line", "send_message", "spawn_agent"])}
+    for h in range(1, 4):
+        scripts[f"helper {h}"] = spawner(f"sub {h}.", ["write_line", "send_message"])
+        for s in range(1, 4):
+            scripts[f"sub {h}.{s}"] = [[call("send_message", to="parent", content="done")], [say("done")]]
+    outcome = await run_live(tmp_path / "runs", Signer.generate(), ScriptedModel(scripts), pace=0, task=research_task())
+    calls = read_jsonl(outcome.run_dir / "calls.jsonl")
+    assert len(outcome.agents) == 13
+    assert not [e for e in calls if e["type"] == "action.refused" or (e["type"] == "action.end" and e["payload"].get("status") == "refused")]
+    assert LIVE_MAX_TOKENS * 0.50 / 1e6 < 1  # even if every token were billed as output, under $1
+
+
+def test_the_pages_default_token_cap_is_the_one_dollar_cap(tmp_path):
+    from harness.monitor_demo import LIVE_MAX_TOKENS
+
+    monitor = Monitor(tmp_path / "runs", Signer.generate())
+    assert monitor.defaults()["max_tokens"] == LIVE_MAX_TOKENS == 1_500_000
