@@ -92,7 +92,7 @@ To give roots different configs, such as a red-team root on another model, use `
 Each `harness run` is stored in `runs/<run ID>/`, and each testbed trial in `<--out folder>/runs/<run ID>/`: `ledger.jsonl`, `calls.jsonl`, their signed heads, `revocations.jsonl` and `workspace/`. Agents can reach only `workspace/`.
 
 ## Checking an agent ID
-`harness whois <agent ID>` says whether this harness created an agent, and if so shows its lineage: the chain from its root down to it, its descendants, how and when it was created, its task and whether it was revoked. It searches `runs/`, `traces/` and `results/*/runs` (`--in <folder>` for others), and `--json` prints the answer for scripts. The exit code is 0 for ours, 1 for not ours and 2 for can't tell.
+`harness whois <agent ID>` says whether this harness created an agent, and if so shows its lineage: the chain from its root down to it, its descendants, how and when it was created, its task and whether it was revoked. It searches `runs/`, `traces/` and `results/*/runs` (`--in <folder>` for others), and `--json` prints the answer for scripts. Add `--logs` to also print the agent's trace from its run (with `--full` for every prompt and model response). The exit code is 0 for ours, 1 for not ours and 2 for can't tell.
 
 - **Another key's fingerprint** in the ID means another harness issued it: not ours.
 - **Our fingerprint** isn't proof by itself, since anyone can type an ID. It's ours when a run here records it with a token our key signed, and that run's logs verify. If the logs fail verification, the answer is can't confirm, because the lineage can't be trusted.

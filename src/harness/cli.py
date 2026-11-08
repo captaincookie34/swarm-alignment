@@ -216,6 +216,15 @@ def cmd_whois(args: argparse.Namespace) -> int:
     search = [Path(p) for p in args.search] if args.search else [args.runs_dir, *map(Path, DEFAULT_SEARCH[1:])]
     result = lookup(agent_id, _trusted_key(args), search, token)
     print(json.dumps(result.to_dict(), indent=2) if args.json else render(result, sys.stdout.isatty()))
+    if (args.logs or args.full) and not args.json:
+        if result.run_dir is None:
+            print("\nno logs: no run here records this agent")
+        else:
+            verified = verify_run(Path(result.run_dir), _trusted_key(args))
+            if verified.status not in (VERIFIED, INCOMPLETE):
+                print(f"\nWARNING: the logs failed verification ({verified}), so what follows can't be trusted.")
+            print(f"\nlogs from {result.run}:\n")
+            print(render_trace(verified, agent_id, args.full))
     return {True: 0, False: 1}.get(result.ours, 2)
 
 
@@ -324,6 +333,8 @@ def build_parser() -> argparse.ArgumentParser:
     whois.add_argument("key", help="an agent ID, a token as JSON, or a file holding one (a ledger entry works too)")
     whois.add_argument("--in", dest="search", action="append", help="folder of runs to search (repeatable; default: --runs-dir, traces, results/*/runs)")
     whois.add_argument("--json", action="store_true", help="print the answer as JSON")
+    whois.add_argument("--logs", action="store_true", help="also print this agent's trace from its run")
+    whois.add_argument("--full", action="store_true", help="with --logs, include every prompt and model response")
     whois.add_argument("--public-key", help="trusted public key (default: from --key-dir)")
     whois.set_defaults(func=cmd_whois)
 

@@ -79,3 +79,14 @@ def test_whois_command_takes_an_id_or_a_ledger_entry_and_sets_the_exit_code(demo
     assert [a["id"] for a in answer["ancestors"]] == [lineage.parent(child), child]
     assert cli_main([*base, IdentityIssuer(Signer.generate(), "r").issue_root().id]) == 1
     assert cli_main([*base, IdentityIssuer(signer, "r").issue_root().id]) == 2
+
+
+def test_whois_logs_prints_the_agents_trace(demo, capsys):
+    signer, key_dir, runs, run_id, by_task = demo
+    child = by_task[PARSER]["child"]
+    base = ["--key-dir", str(key_dir), "--runs-dir", str(runs), "whois"]
+    assert cli_main([*base, child, "--logs"]) == 0
+    out = capsys.readouterr().out
+    assert f"logs from {run_id}" in out and child in out.split("logs from")[1]
+    assert cli_main([*base, IdentityIssuer(signer, "r").issue_root().id, "--logs"]) == 2
+    assert "no logs" in capsys.readouterr().out
